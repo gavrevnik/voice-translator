@@ -22,7 +22,7 @@ import { BrowserTtsProvider, GeminiTtsProvider, type TtsProvider } from "./servi
 type LanguageSide = "a" | "b";
 type TtsSelectionId = "browser" | "gemini";
 
-const models: TranslationModelId[] = ["gpt-5.6-luna", "gpt-5.6-terra"];
+const models: TranslationModelId[] = ["gpt-5.6-luna"];
 const geminiModels: GeminiTranslationModelId[] = [
   "gemini-3.1-flash-lite",
   "gemini-3.5-flash-lite",
@@ -65,9 +65,7 @@ function readStoredTranslation(): TranslationSelectionId {
       ? "gemini:gemini-3.5-flash-lite"
       : "gemini:gemini-3.1-flash-lite";
   }
-  return localStorage.getItem("between.model") === "gpt-5.6-terra"
-    ? "codex:gpt-5.6-terra"
-    : "codex:gpt-5.6-luna";
+  return "codex:gpt-5.6-luna";
 }
 
 function readStoredTts(): TtsSelectionId {

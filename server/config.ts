@@ -27,14 +27,10 @@ export function readConfig(): AppConfig {
     port: Number(process.env.PORT || 8787),
     groqApiKey: optional(process.env.GROQ_API_KEY),
     groqSttModel: "whisper-large-v3",
-    codexModel: readModel(process.env.CODEX_MODEL),
+    codexModel: "gpt-5.6-luna",
     codexCliPath: optional(process.env.CODEX_CLI_PATH),
     geminiApiKey: optional(process.env.GEMINI_API_KEY),
     geminiModel: "gemini-3.1-flash-lite",
     projectRoot,
   };
-}
-
-function readModel(value: string | undefined): TranslationModelId {
-  return optional(value) === "gpt-5.6-terra" ? "gpt-5.6-terra" : "gpt-5.6-luna";
 }

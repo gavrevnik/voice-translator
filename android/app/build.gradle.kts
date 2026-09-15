@@ -35,8 +35,8 @@ android {
         applicationId = "com.sayit.translator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.5.0"
 
         buildConfigField("String", "GROQ_API_KEY", groqApiKey.asBuildConfigString())
         buildConfigField("String", "GEMINI_API_KEY", geminiApiKey.asBuildConfigString())

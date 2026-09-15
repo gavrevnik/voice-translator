@@ -1,14 +1,13 @@
 import type { Language, LanguagePair } from "./languages";
 
 export type TranslationProviderId = "codex" | "gemini";
-export type TranslationModelId = "gpt-5.6-luna" | "gpt-5.6-terra";
+export type TranslationModelId = "gpt-5.6-luna";
 export type GeminiTranslationModelId =
   | "gemini-3.1-flash-lite"
   | "gemini-3.5-flash-lite";
 
 export type TranslationSelectionId =
   | "codex:gpt-5.6-luna"
-  | "codex:gpt-5.6-terra"
   | "gemini:gemini-3.1-flash-lite"
   | "gemini:gemini-3.5-flash-lite";
 
@@ -26,12 +25,6 @@ export const translationSelections: readonly TranslationSelection[] = [
     label: "Codex GPT-5.6 Luna",
     provider: "codex",
     model: "gpt-5.6-luna",
-  },
-  {
-    id: "codex:gpt-5.6-terra",
-    label: "Codex GPT-5.6 Terra",
-    provider: "codex",
-    model: "gpt-5.6-terra",
   },
   {
     id: "gemini:gemini-3.1-flash-lite",

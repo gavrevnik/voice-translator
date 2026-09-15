@@ -29,7 +29,7 @@ app.get("/api/config", (_request, response) => {
   response.json({
     languages: languageRegistry,
     defaultProvider: "codex",
-    models: ["gpt-5.6-luna", "gpt-5.6-terra"],
+    models: ["gpt-5.6-luna"],
     geminiModels: ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"],
     defaultModel: config.codexModel,
     defaultGeminiModel: config.geminiModel,
@@ -195,7 +195,7 @@ function requireTtsLanguage(value: unknown) {
 }
 
 function requireModel(value: unknown): TranslationModelId {
-  if (value === "gpt-5.6-luna" || value === "gpt-5.6-terra") return value;
+  if (value === "gpt-5.6-luna") return value;
   throw new AppError("Unsupported translation model.", 400);
 }
 

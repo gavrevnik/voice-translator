@@ -26,7 +26,7 @@ class AppModelsTest {
         )
         assertEquals("gpt-5.6-luna", state.model.id)
         assertEquals(TranslationOption.GEMINI_3_1, TranslationOption.from(state))
-        assertEquals(4, TranslationOption.entries.size)
+        assertEquals(3, TranslationOption.entries.size)
     }
 
     @Test

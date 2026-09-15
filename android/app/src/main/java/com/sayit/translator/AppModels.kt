@@ -20,7 +20,6 @@ enum class LanguageSide { A, B }
 
 enum class TranslationModel(val id: String) {
     LUNA("gpt-5.6-luna"),
-    TERRA("gpt-5.6-terra"),
 }
 
 enum class GeminiTranslationModel(val id: String) {
@@ -50,7 +49,6 @@ enum class TranslationOption(
     val geminiModel: GeminiTranslationModel? = null,
 ) {
     OPENAI_LUNA("GPT-5.6 Luna", TranslationEngine.OPENAI, openAiModel = TranslationModel.LUNA),
-    OPENAI_TERRA("GPT-5.6 Terra", TranslationEngine.OPENAI, openAiModel = TranslationModel.TERRA),
     GEMINI_3_1(
         "Gemini Flash 3.1",
         TranslationEngine.GEMINI,

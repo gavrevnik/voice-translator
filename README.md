@@ -8,12 +8,12 @@
 
 Каждый голосовой запрос проходит три этапа: `STT → Translate → TTS`.
 
-Выбранные движки отображаются прямо в однострочной шкале прогресса. Справа от неё во время записи показывается таймер, а во время озвучивания — компактная квадратная кнопка остановки.
+На Android однострочная шкала показывает `Speech → выбранная модель → Playback`: справа во время записи появляется таймер, а во время озвучивания — компактная квадратная кнопка остановки. Конкретные провайдеры и модели выбираются на отдельном экране настроек.
 
 | Этап | Web | Android |
 | --- | --- | --- |
 | **STT** — речь → текст | **Groq Whisper Large V3** (`whisper-large-v3`), единственный вариант | **Android/Samsung SpeechRecognizer** по умолчанию или **Groq Whisper Large V3** (`whisper-large-v3`) |
-| **Translate** — перевод | **Codex SDK** по умолчанию (`gpt-5.6-luna`/`gpt-5.6-terra`, фиксированный reasoning `low`) или **Gemini Flash-Lite** (`gemini-3.1-flash-lite` / `gemini-3.5-flash-lite`, thinking `minimal`) | **Gemini Flash-Lite** по умолчанию (`gemini-3.1-flash-lite` / `gemini-3.5-flash-lite`, thinking `minimal`) или **OpenAI API** (`gpt-5.6-luna`/`gpt-5.6-terra`, reasoning `none`) |
+| **Translate** — перевод | **Codex SDK** по умолчанию (`gpt-5.6-luna`, фиксированный reasoning `low`) или **Gemini Flash-Lite** (`gemini-3.1-flash-lite` / `gemini-3.5-flash-lite`, thinking `minimal`) | **Gemini Flash-Lite** по умолчанию (`gemini-3.1-flash-lite` / `gemini-3.5-flash-lite`, thinking `minimal`) или **OpenAI API** (`gpt-5.6-luna`, reasoning `none`) |
 | **TTS** — текст → речь | **Browser TTS** по умолчанию или **Gemini 3.1 Flash TTS Preview** (`gemini-3.1-flash-tts-preview`) | **Android System TTS** по умолчанию или **Gemini 3.1 Flash TTS Preview** (`gemini-3.1-flash-tts-preview`) |
 
 На вебе WAV-запись отправляется с локального Node-бэкенда в Groq для распознавания, а Gemini TTS возвращается браузеру как WAV. Ключи Gemini и Groq не передаются браузерному JavaScript. В Android облачные ключи встраиваются в тестовый APK, а OpenAI-ключ вводится в приложении и хранится через Android Keystore.
@@ -40,7 +40,7 @@ npm run dev
 
 - `GROQ_API_KEY` — STT на вебе и опциональный Groq STT в Android;
 - `GEMINI_API_KEY` — перевод в вебе/Android и Gemini TTS в Android;
-- `CODEX_MODEL`, `CODEX_CLI_PATH` — стартовая модель и необязательный путь к Codex CLI для веб-провайдера;
+- `CODEX_CLI_PATH` — необязательный путь к Codex CLI для веб-провайдера;
 - `PORT` — порт локального API, по умолчанию `8787`.
 
 Android-сборка читает Gemini/Groq ключи из корневого `.env` и встраивает их в APK. Такой APK предназначен только для личного тестирования: ключи можно извлечь. Перед распространением приложения перенесите облачные вызовы на собственный backend и отзовите встроенные ключи.

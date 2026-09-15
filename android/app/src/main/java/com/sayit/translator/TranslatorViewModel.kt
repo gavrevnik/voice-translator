@@ -81,6 +81,24 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun swapLanguages() {
+        val current = _uiState.value
+        if (current.status != VoiceStatus.READY && current.status != VoiceStatus.ERROR) return
+        settings.languageA = current.languageB
+        settings.languageB = current.languageA
+        _uiState.update {
+            it.copy(
+                languageA = current.languageB,
+                languageB = current.languageA,
+                textA = "",
+                textB = "",
+                resultSide = null,
+                status = VoiceStatus.READY,
+                error = null,
+            )
+        }
+    }
+
     fun setTranslationOption(option: TranslationOption) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
         settings.translationEngine = option.engine
