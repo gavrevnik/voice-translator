@@ -1,0 +1,63 @@
+#!/bin/zsh
+set -eu
+setopt NO_BG_NICE
+
+SCRIPT_DIR="${0:A:h}"
+REPO_DIR="${SCRIPT_DIR}/../../.."
+REPO_DIR="${REPO_DIR:A}"
+URL="http://127.0.0.1:5173/"
+API_URL="http://127.0.0.1:8787/api/status"
+RUNTIME_DIR="${REPO_DIR}/.runtime"
+LOG_FILE="${RUNTIME_DIR}/web.log"
+PID_FILE="${RUNTIME_DIR}/web.pid"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+NPM_BIN="$(command -v npm || true)"
+
+frontend_ready() {
+  /usr/bin/curl -fsS --max-time 1 "${URL}" >/dev/null 2>&1
+}
+
+api_ready() {
+  /usr/bin/curl -fsS --max-time 1 "${API_URL}" 2>/dev/null |
+    /usr/bin/grep -q '"application":"voice-translator"'
+}
+
+if frontend_ready && api_ready; then
+  /usr/bin/open "${URL}"
+  exit 0
+fi
+
+if [[ -z "${NPM_BIN}" ]]; then
+  /usr/bin/osascript -e 'display alert "Say it" message "Node.js/npm не найден. Установите Node.js 20+ и повторите запуск." as critical'
+  exit 1
+fi
+
+for port in 5173 8787; do
+  listener_pid=$(/usr/sbin/lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null | /usr/bin/head -n 1 || true)
+  if [[ "${listener_pid}" == <-> ]]; then
+    /usr/bin/osascript -e "display alert \"Say it\" message \"Порт ${port} занят другим или незавершённым процессом. Остановите его и повторите запуск.\" as critical"
+    exit 1
+  fi
+done
+
+/bin/mkdir -p "${RUNTIME_DIR}"
+/usr/bin/nohup /bin/zsh -c '
+  cd "$1"
+  if [[ ! -d node_modules ]]; then
+    "$2" install
+  fi
+  exec "$2" run dev
+' voice-translator-launcher "${REPO_DIR}" "${NPM_BIN}" >>"${LOG_FILE}" 2>&1 </dev/null &
+print -r -- "$!" >"${PID_FILE}"
+
+for _ in {1..300}; do
+  if frontend_ready && api_ready; then
+    /usr/bin/open "${URL}"
+    exit 0
+  fi
+  /bin/sleep 0.1
+done
+
+/usr/bin/osascript -e 'display alert "Say it" message "Не удалось запустить веб-приложение. Подробности: .runtime/web.log" as critical'
+exit 1
