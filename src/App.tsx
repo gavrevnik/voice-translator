@@ -15,12 +15,17 @@ import {
   translate,
   type ClientConfig,
   type ProviderConfig,
+  type TranscriptionResult,
 } from "./services/api";
 import { BrowserAudioRecorder } from "./services/audio-recorder";
+import { BrowserSttProvider } from "./services/stt";
 import { BrowserTtsProvider, GeminiTtsProvider, type TtsProvider } from "./services/tts";
 
 type LanguageSide = "a" | "b";
+type SttSelectionId = "browser" | "groq-whisper";
 type TtsSelectionId = "browser" | "gemini";
+const defaultTranslationSelectionId: TranslationSelectionId =
+  "gemini:gemini-3.1-flash-lite";
 
 const models: TranslationModelId[] = ["gpt-5.6-luna"];
 const geminiModels: GeminiTranslationModelId[] = [
@@ -46,7 +51,7 @@ const fallbackProviders: ProviderConfig[] = [
 
 const fallbackConfig: ClientConfig = {
   languages: [...languageRegistry],
-  defaultProvider: "codex",
+  defaultProvider: "gemini",
   models,
   geminiModels,
   defaultModel: "gpt-5.6-luna",
@@ -54,22 +59,12 @@ const fallbackConfig: ClientConfig = {
   providers: fallbackProviders,
 };
 
-function readStoredTranslation(): TranslationSelectionId {
-  const stored = localStorage.getItem("between.translation");
-  const current = translationSelections.find((selection) => selection.id === stored);
-  if (current) return current.id;
-
-  const legacyProvider = localStorage.getItem("between.provider");
-  if (legacyProvider === "gemini") {
-    return localStorage.getItem("between.geminiModel") === "gemini-3.5-flash-lite"
-      ? "gemini:gemini-3.5-flash-lite"
-      : "gemini:gemini-3.1-flash-lite";
-  }
-  return "codex:gpt-5.6-luna";
-}
-
 function readStoredTts(): TtsSelectionId {
   return localStorage.getItem("between.tts") === "gemini" ? "gemini" : "browser";
+}
+
+function readStoredStt(): SttSelectionId {
+  return localStorage.getItem("between.stt") === "groq-whisper" ? "groq-whisper" : "browser";
 }
 
 function toMessage(error: unknown): string {
@@ -78,6 +73,8 @@ function toMessage(error: unknown): string {
 
 export default function App() {
   const recorder = useRef(new BrowserAudioRecorder());
+  const browserStt = useRef(new BrowserSttProvider());
+  const activeRecordingStt = useRef<SttSelectionId | undefined>(undefined);
   const ttsProviders = useRef({
     browser: new BrowserTtsProvider(),
     gemini: new GeminiTtsProvider(),
@@ -89,8 +86,9 @@ export default function App() {
   const [languageA, setLanguageA] = useState("ru");
   const [languageB, setLanguageB] = useState("en");
   const [translationSelectionId, setTranslationSelectionId] = useState<TranslationSelectionId>(
-    readStoredTranslation,
+    defaultTranslationSelectionId,
   );
+  const [sttSelection, setSttSelection] = useState<SttSelectionId>(readStoredStt);
   const [ttsSelection, setTtsSelection] = useState<TtsSelectionId>(readStoredTts);
   const [textA, setTextA] = useState("");
   const [textB, setTextB] = useState("");
@@ -117,9 +115,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("between.translation", translationSelectionId);
+    localStorage.setItem("between.stt", sttSelection);
     localStorage.setItem("between.tts", ttsSelection);
-  }, [translationSelectionId, ttsSelection]);
+  }, [sttSelection, ttsSelection]);
+
+  useEffect(() => {
+    localStorage.removeItem("between.translation");
+    localStorage.removeItem("between.provider");
+    localStorage.removeItem("between.geminiModel");
+  }, []);
 
   useEffect(() => {
     if (state !== "listening") return;
@@ -135,6 +139,7 @@ export default function App() {
   useEffect(
     () => () => {
       recorder.current.cancel().catch(() => undefined);
+      browserStt.current.cancel().catch(() => undefined);
       ttsProviders.current.browser.stop();
       ttsProviders.current.gemini.stop();
     },
@@ -151,18 +156,24 @@ export default function App() {
 
   const startListening = async (side: LanguageSide) => {
     const currentOperation = ++operationId.current;
+    const sourceLanguage = side === "a" ? firstLanguage : secondLanguage;
+    const selectedStt = sttSelection;
+    activeRecordingStt.current = selectedStt;
     try {
       activeTts.current?.stop();
       clearTurn();
-      await recorder.current.start();
+      if (selectedStt === "browser") await browserStt.current.start(sourceLanguage);
+      else await recorder.current.start();
       if (currentOperation !== operationId.current) {
-        await recorder.current.cancel();
+        if (selectedStt === "browser") await browserStt.current.cancel();
+        else await recorder.current.cancel();
         return;
       }
       setRecordingSide(side);
       setState("listening");
     } catch (caught) {
       if (currentOperation !== operationId.current) return;
+      activeRecordingStt.current = undefined;
       setRecordingSide(undefined);
       setError(toMessage(caught));
       setState("error");
@@ -173,16 +184,22 @@ export default function App() {
     const currentOperation = operationId.current;
     const sourceLanguage = side === "a" ? firstLanguage : secondLanguage;
     const targetLanguage = side === "a" ? secondLanguage : firstLanguage;
+    const selectedStt = activeRecordingStt.current || sttSelection;
     setState("recognizing");
 
     try {
       const stoppedAt = performance.now();
-      const wav = await recorder.current.stop();
-      const recordingFinalizeMs = performance.now() - stoppedAt;
-      if (currentOperation !== operationId.current) return;
-
       const recognitionStartedAt = performance.now();
-      const transcript = await transcribe(wav, sourceLanguage.whisperCode);
+      let recordingFinalizeMs: number | undefined;
+      let transcript: TranscriptionResult;
+      if (selectedStt === "browser") {
+        transcript = { text: await browserStt.current.stop() };
+      } else {
+        const wav = await recorder.current.stop();
+        recordingFinalizeMs = performance.now() - stoppedAt;
+        if (currentOperation !== operationId.current) return;
+        transcript = await transcribe(wav, sourceLanguage.whisperCode);
+      }
       const recognitionRoundTripMs = performance.now() - recognitionStartedAt;
       if (currentOperation !== operationId.current) return;
       if (side === "a") setTextA(transcript.text);
@@ -220,20 +237,25 @@ export default function App() {
       });
       if (currentOperation !== operationId.current) return;
       console.info("[timing] turn", {
-        recordingFinalizeMs: roundMs(recordingFinalizeMs),
+        recordingFinalizeMs: recordingFinalizeMs === undefined
+          ? undefined
+          : roundMs(recordingFinalizeMs),
         recognitionRoundTripMs: roundMs(recognitionRoundTripMs),
         recognitionServerMs: transcript.processingMs,
         translationRoundTripMs: roundMs(translationRoundTripMs),
         translationServerMs: translated.processingMs,
         playbackTotalMs: roundMs(performance.now() - playbackRequestedAt),
+        stt: selectedStt,
         provider,
         model,
         geminiModel,
       });
+      activeRecordingStt.current = undefined;
       setRecordingSide(undefined);
       setState("ready");
     } catch (caught) {
       if (currentOperation !== operationId.current) return;
+      activeRecordingStt.current = undefined;
       setRecordingSide(undefined);
       setError(toMessage(caught));
       setState("error");
@@ -271,6 +293,7 @@ export default function App() {
     if (state !== "speaking") return;
     operationId.current += 1;
     activeTts.current?.stop();
+    activeRecordingStt.current = undefined;
     setRecordingSide(undefined);
     setState("ready");
   };
@@ -285,55 +308,53 @@ export default function App() {
   return (
     <div className="app-shell">
       <main className="minimal-workspace">
-        <header className="minimal-header">
-          <h1>Say it<span>.</span></h1>
-          <button
-            className="settings-button"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Open settings"
-          >
-            <SettingsIcon />
-          </button>
-        </header>
-
         <section className="language-section" aria-label="Languages">
-          <div className="language-row">
-            <div className="language-control-group">
-              <LanguageSelect
-                side="a"
-                value={languageA}
-                otherValue={languageB}
-                languages={languages}
-                disabled={busy}
-                onChange={(value) => updateLanguage("a", value)}
-              />
-              <VoiceButton
-                side="a"
-                language={firstLanguage}
-                state={state}
-                active={recordingSide === "a"}
-                disabled={busy && (state !== "listening" || recordingSide !== "a")}
-                onClick={() => handleVoiceAction("a")}
-              />
+          <div className="language-with-settings">
+            <div className="language-row">
+              <div className="language-control-group">
+                <LanguageSelect
+                  side="a"
+                  value={languageA}
+                  otherValue={languageB}
+                  languages={languages}
+                  disabled={busy}
+                  onChange={(value) => updateLanguage("a", value)}
+                />
+                <VoiceButton
+                  side="a"
+                  language={firstLanguage}
+                  state={state}
+                  active={recordingSide === "a"}
+                  disabled={busy && (state !== "listening" || recordingSide !== "a")}
+                  onClick={() => handleVoiceAction("a")}
+                />
+              </div>
+              <div className="language-control-group">
+                <LanguageSelect
+                  side="b"
+                  value={languageB}
+                  otherValue={languageA}
+                  languages={languages}
+                  disabled={busy}
+                  onChange={(value) => updateLanguage("b", value)}
+                />
+                <VoiceButton
+                  side="b"
+                  language={secondLanguage}
+                  state={state}
+                  active={recordingSide === "b"}
+                  disabled={busy && (state !== "listening" || recordingSide !== "b")}
+                  onClick={() => handleVoiceAction("b")}
+                />
+              </div>
             </div>
-            <div className="language-control-group">
-              <LanguageSelect
-                side="b"
-                value={languageB}
-                otherValue={languageA}
-                languages={languages}
-                disabled={busy}
-                onChange={(value) => updateLanguage("b", value)}
-              />
-              <VoiceButton
-                side="b"
-                language={secondLanguage}
-                state={state}
-                active={recordingSide === "b"}
-                disabled={busy && (state !== "listening" || recordingSide !== "b")}
-                onClick={() => handleVoiceAction("b")}
-              />
-            </div>
+            <button
+              className="settings-button"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Open settings"
+            >
+              <SettingsIcon />
+            </button>
           </div>
         </section>
 
@@ -341,6 +362,9 @@ export default function App() {
           state={state}
           hasResult={Boolean(result)}
           recordingSeconds={recordingSeconds}
+          sttLabel={(activeRecordingStt.current || sttSelection) === "browser"
+            ? "Browser STT"
+            : "Groq Whisper"}
           translationLabel={translationSelection.label}
           ttsLabel={ttsSelection === "gemini" ? "Gemini Flash" : "Browser TTS"}
           onStopPlayback={stopPlayback}
@@ -370,6 +394,8 @@ export default function App() {
         <SettingsPanel
           selectedTranslation={translationSelectionId}
           onSelectTranslation={setTranslationSelectionId}
+          selectedStt={sttSelection}
+          onSelectStt={setSttSelection}
           selectedTts={ttsSelection}
           onSelectTts={(selection) => {
             activeTts.current?.stop();
@@ -386,6 +412,7 @@ function TurnProgress({
   state,
   hasResult,
   recordingSeconds,
+  sttLabel,
   translationLabel,
   ttsLabel,
   onStopPlayback,
@@ -393,6 +420,7 @@ function TurnProgress({
   state: VoiceTranslatorState;
   hasResult: boolean;
   recordingSeconds: number;
+  sttLabel: string;
   translationLabel: string;
   ttsLabel: string;
   onStopPlayback: () => void;
@@ -407,7 +435,7 @@ function TurnProgress({
           ? 3
           : -1;
   const stages = [
-    "Speech recognition (Groq Whisper)",
+    `Speech recognition (${sttLabel})`,
     `Translation (${translationLabel})`,
     `Playback (${ttsLabel})`,
   ];
@@ -559,12 +587,16 @@ function PhraseCard({
 function SettingsPanel({
   selectedTranslation,
   onSelectTranslation,
+  selectedStt,
+  onSelectStt,
   selectedTts,
   onSelectTts,
   onClose,
 }: {
   selectedTranslation: TranslationSelectionId;
   onSelectTranslation: (selection: TranslationSelectionId) => void;
+  selectedStt: SttSelectionId;
+  onSelectStt: (selection: SttSelectionId) => void;
   selectedTts: TtsSelectionId;
   onSelectTts: (selection: TtsSelectionId) => void;
   onClose: () => void;
@@ -581,12 +613,13 @@ function SettingsPanel({
 
         <div className="settings-fields">
           <label>
-            <span>Speech recognition</span>
+            <span>Recognition</span>
             <select
-              value="groq-whisper"
-              onChange={() => undefined}
-              aria-label="Speech recognition"
+              value={selectedStt}
+              onChange={(event) => onSelectStt(event.target.value as SttSelectionId)}
+              aria-label="Recognition"
             >
+              <option value="browser">Browser STT</option>
               <option value="groq-whisper">Groq Whisper</option>
             </select>
           </label>
@@ -604,11 +637,11 @@ function SettingsPanel({
             </select>
           </label>
           <label>
-            <span>Speech playback</span>
+            <span>Playback</span>
             <select
               value={selectedTts}
               onChange={(event) => onSelectTts(event.target.value as TtsSelectionId)}
-              aria-label="Speech playback"
+              aria-label="Playback"
             >
               <option value="browser">Browser TTS</option>
               <option value="gemini">Gemini Flash</option>

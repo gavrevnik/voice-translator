@@ -27,6 +27,7 @@ class GeminiTranslationProvider(
         transcript: String,
         model: TranslationModel,
         geminiModel: GeminiTranslationModel,
+        serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {
         val prompt = translationPrompt(sourceLanguage, targetLanguage, transcript)
         val payload = JSONObject()

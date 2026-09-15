@@ -20,6 +20,7 @@ interface TranslationProvider {
         transcript: String,
         model: TranslationModel,
         geminiModel: GeminiTranslationModel,
+        serbianScript: SerbianScript,
     ): TranslationResult
 }
 
@@ -38,6 +39,7 @@ class OpenAiTranslationProvider(
         transcript: String,
         model: TranslationModel,
         geminiModel: GeminiTranslationModel,
+        serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {
         val prompt = translationPrompt(sourceLanguage, targetLanguage, transcript)
         val payload = JSONObject()

@@ -52,6 +52,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -117,6 +118,9 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             onSaveKey = viewModel::saveApiKey,
             onDeleteKey = viewModel::deleteApiKey,
             onTranslationOption = viewModel::setTranslationOption,
+            onSerbianScript = viewModel::setSerbianScript,
+            onDownloadOfflineModel = viewModel::downloadOfflineModel,
+            onDeleteOfflineModel = viewModel::deleteOfflineModel,
             onTtsEngine = viewModel::setTtsEngine,
             onSttEngine = viewModel::setSttEngine,
             onBack = { settingsOpen = false },
@@ -149,8 +153,6 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Header(onSettings = { settingsOpen = true })
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -215,6 +217,12 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
                 activeSide = state.activeSide,
                 onMicrophone = { onMicrophone(LanguageSide.B) },
             )
+            IconButton(
+                onClick = { settingsOpen = true },
+                modifier = Modifier.size(64.dp),
+            ) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings")
+            }
         }
 
         TurnProgress(
@@ -398,38 +406,6 @@ private fun ProgressConnector(completed: Boolean) {
             .height(2.dp)
             .background(if (completed) SayItInk else SayItMuted.copy(alpha = 0.25f)),
     )
-}
-
-@Composable
-private fun Header(
-    onSettings: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(78.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "Say it",
-                fontFamily = FontFamily.Serif,
-                fontSize = 54.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = (-2).sp,
-            )
-            Text(
-                text = ".",
-                color = SayItRed,
-                fontFamily = FontFamily.Serif,
-                fontSize = 54.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-        IconButton(onClick = onSettings, modifier = Modifier.align(Alignment.CenterEnd)) {
-            Icon(Icons.Filled.Settings, contentDescription = "Settings")
-        }
-    }
 }
 
 @Composable
@@ -734,6 +710,9 @@ private fun SettingsScreen(
     onSaveKey: (String) -> Boolean,
     onDeleteKey: () -> Unit,
     onTranslationOption: (TranslationOption) -> Unit,
+    onSerbianScript: (SerbianScript) -> Unit,
+    onDownloadOfflineModel: () -> Unit,
+    onDeleteOfflineModel: () -> Unit,
     onTtsEngine: (TtsEngine) -> Unit,
     onSttEngine: (SttEngine) -> Unit,
     onBack: () -> Unit,
@@ -775,78 +754,81 @@ private fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             SettingsSection(
-                title = "Speech recognition",
-                description = "Turns speech into text before translation.",
+                title = "Recognition",
             ) {
                 SettingPicker(
-                    label = "Engine",
                     value = state.sttEngine,
                     items = SttEngine.entries,
                     itemLabel = { it.label },
                     onSelected = onSttEngine,
                 )
-                Text(
-                    text = when (state.sttEngine) {
-                        SttEngine.SYSTEM -> "Uses the Android recognition service configured on this phone."
-                        SttEngine.GROQ -> "Uses Groq $GROQ_STT_MODEL after recording stops."
-                    },
-                    color = SayItMuted,
-                    fontSize = 13.sp,
-                )
             }
 
             SettingsSection(
                 title = "Translation",
-                description = "Choose the model used for every translated phrase.",
             ) {
                 SettingPicker(
-                    label = "Model",
                     value = TranslationOption.from(state),
                     items = TranslationOption.entries,
                     itemLabel = { it.label },
+                    itemEnabled = { option ->
+                        option != TranslationOption.OFFLINE_OPUS ||
+                            (
+                                isOfflineOpusDirection(state.languageA, state.languageB) &&
+                                    state.offlineRuntimeAvailable
+                                )
+                    },
                     onSelected = onTranslationOption,
                 )
-                Text(
-                    text = when (state.translationEngine) {
-                        TranslationEngine.OPENAI -> "Reasoning is disabled for low-latency spoken translation."
-                        TranslationEngine.GEMINI -> "Uses minimal thinking for low-latency spoken translation."
-                    },
-                    color = SayItMuted,
-                    fontSize = 13.sp,
-                )
-                if (state.translationEngine == TranslationEngine.OPENAI && !state.hasOpenAiApiKey) {
+                if (!isOfflineOpusDirection(state.languageA, state.languageB)) {
                     Text(
-                        text = "Add an OpenAI API key below before using this model.",
-                        color = MaterialTheme.colorScheme.error,
+                        text = "Offline OPUS is available only for Russian ↔ Serbian.",
+                        color = SayItMuted,
                         fontSize = 13.sp,
+                    )
+                }
+                if (!state.offlineRuntimeAvailable) {
+                    Text(
+                        text = "Offline OPUS requires arm64 and Android 9 or newer.",
+                        color = SayItMuted,
+                        fontSize = 13.sp,
+                    )
+                }
+                if (state.translationEngine == TranslationEngine.OFFLINE_OPUS) {
+                    Text(
+                        text = "Serbian output",
+                        color = SayItMuted,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    SettingPicker(
+                        value = state.serbianScript,
+                        items = SerbianScript.entries,
+                        itemLabel = { it.label },
+                        onSelected = onSerbianScript,
+                    )
+                    OfflineModelPanel(
+                        status = state.offlineModelStatus,
+                        downloadSizeLabel = state.offlineModelDownloadSizeLabel,
+                        onDownload = onDownloadOfflineModel,
+                        onDelete = onDeleteOfflineModel,
                     )
                 }
             }
 
             SettingsSection(
-                title = "Speech playback",
-                description = "Controls how the translated phrase is spoken aloud.",
+                title = "Playback",
             ) {
                 SettingPicker(
-                    label = "Engine",
                     value = state.ttsEngine,
                     items = TtsEngine.entries,
                     itemLabel = { it.label },
                     onSelected = onTtsEngine,
                 )
-                Text(
-                    text = when (state.ttsEngine) {
-                        TtsEngine.SYSTEM -> "Uses an Android system voice installed on this phone."
-                        TtsEngine.GEMINI -> "Uses $GEMINI_TTS_MODEL with the packaged test key."
-                    },
-                    color = SayItMuted,
-                    fontSize = 13.sp,
-                )
             }
 
             SettingsSection(
                 title = "API keys & connection",
-                description = "Keys are never displayed. Packaged service keys are configured at build time.",
             ) {
                 KeyStatusRow(
                     label = "Gemini API key",
@@ -890,7 +872,6 @@ private fun SettingsScreen(
 @Composable
 private fun SettingsSection(
     title: String,
-    description: String,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -904,7 +885,6 @@ private fun SettingsSection(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(title, color = SayItInk, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text(description, color = SayItMuted, fontSize = 13.sp, lineHeight = 18.sp)
             content()
         }
     }
@@ -1039,42 +1019,109 @@ private fun OpenAiKeyDialog(
 
 @Composable
 private fun <T> SettingPicker(
-    label: String,
     value: T,
     items: List<T>,
     itemLabel: (T) -> String,
+    itemEnabled: (T) -> Boolean = { true },
     onSelected: (T) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        Box {
-            Surface(
-                onClick = { expanded = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(12.dp),
-                color = Color.White,
-                border = BorderStroke(1.dp, SayItInk.copy(alpha = 0.18f)),
+    Box {
+        Surface(
+            onClick = { expanded = true },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = Color.White,
+            border = BorderStroke(1.dp, SayItInk.copy(alpha = 0.18f)),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(itemLabel(value), modifier = Modifier.weight(1f), fontSize = 16.sp)
-                    Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
-                }
+                Text(itemLabel(value), modifier = Modifier.weight(1f), fontSize = 16.sp)
+                Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
             }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                items.forEach { item ->
-                    DropdownMenuItem(
-                        text = { Text(itemLabel(item)) },
-                        onClick = {
-                            onSelected(item)
-                            expanded = false
-                        },
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            items.forEach { item ->
+                val enabled = itemEnabled(item)
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = itemLabel(item),
+                            color = if (enabled) SayItInk else SayItMuted.copy(alpha = 0.55f),
+                        )
+                    },
+                    enabled = enabled,
+                    onClick = {
+                        onSelected(item)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineModelPanel(
+    status: OfflineModelStatus,
+    downloadSizeLabel: String,
+    onDownload: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = SayItPaper.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(15.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Russian ↔ Serbian", color = SayItInk, fontWeight = FontWeight.Bold)
+            Text("Offline", color = SayItMuted, fontSize = 13.sp)
+            when (status) {
+                OfflineModelStatus.NotInstalled -> Button(
+                    onClick = onDownload,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Download model ($downloadSizeLabel)")
+                }
+
+                is OfflineModelStatus.Downloading -> {
+                    val percent = (status.progress * 100).toInt()
+                    LinearProgressIndicator(
+                        progress = { status.progress },
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    Text("Downloading · $percent%", color = SayItMuted, fontSize = 13.sp)
+                }
+
+                is OfflineModelStatus.Installed -> {
+                    Text(
+                        "Installed · Works offline · ${status.installedSizeLabel}",
+                        color = SayItInk.copy(alpha = 0.7f),
+                        fontSize = 13.sp,
+                    )
+                    TextButton(onClick = onDelete) { Text("Delete model") }
+                }
+
+                is OfflineModelStatus.Invalid -> {
+                    Text(status.reason, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    Button(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
+                        Text("Download again ($downloadSizeLabel)")
+                    }
+                    TextButton(onClick = onDelete) { Text("Delete model") }
+                }
+
+                is OfflineModelStatus.Error -> {
+                    Text(status.reason, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    Button(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
+                        Text("Retry download ($downloadSizeLabel)")
+                    }
                 }
             }
         }

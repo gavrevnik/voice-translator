@@ -1,0 +1,60 @@
+{
+  "id": "opus-mt-sla-sla-int8",
+  "version": "1",
+  "source": "Helsinki-NLP/opus-mt-sla-sla (opus-2020-07-27)",
+  "sourceUrl": "https://object.pouta.csc.fi/Tatoeba-MT-models/sla-sla/opus-2020-07-27.zip",
+  "sourceSha256": "b6cf76509de6ee34789ec2d169f4c5f85bd25170deb2ab75f2896c0f1b347a17",
+  "license": "Apache-2.0",
+  "quantization": "INT8 / Marian intgemm8",
+  "runtimeType": "Bergamot/Marian via translate-kit",
+  "runtimeVersion": "translate-kit-android 0.1.0",
+  "supportedDirections": [
+    "ru-sr",
+    "sr-ru"
+  ],
+  "supportedScripts": [
+    "srp_Latn",
+    "srp_Cyrl"
+  ],
+  "defaultSerbianScript": "srp_Latn",
+  "files": [
+    {
+      "name": "model.intgemm8.bin",
+      "size": 64176671,
+      "sha256": "980315313b9509f5378c485c1e8693cf57f7fa05458714032434f2d4dd5f9e52"
+    },
+    {
+      "name": "source.spm",
+      "size": 1079276,
+      "sha256": "61a605ddddd352f6ce736d9e0c458c78e0ea61067f6c338e88e05dd6d1ab4fb8"
+    },
+    {
+      "name": "target.spm",
+      "size": 1079276,
+      "sha256": "d162518ac5a09b935e0014dfbd2a5a627838118cfb08007af02091ecb11ed1e8"
+    },
+    {
+      "name": "lex.s2t.bin",
+      "size": 458220,
+      "sha256": "260d5d5dabc3b2e355da7076650798c4bdcd6ffb0aa2f4ba81f8a585a28f1844"
+    },
+    {
+      "name": "config.yml",
+      "size": 254,
+      "sha256": "00dde3faefd474e437fbb3bbb3ac0f12c8b96a7083711c712e02bfa3a333722f"
+    }
+  ],
+  "displayName": "OPUS Slavic — Offline",
+  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-opus-sla-v1/offline-opus-sla-int8-v1.zip",
+  "sha256": "0eefe9d196880a89f2d91c6b7c584e0353407954f95b7902de38fa9a5ab74976",
+  "downloadSize": 45045954,
+  "installedSize": 66813730,
+  "requiredFiles": [
+    "model.intgemm8.bin",
+    "source.spm",
+    "target.spm",
+    "lex.s2t.bin",
+    "config.yml",
+    "manifest.json"
+  ]
+}

@@ -14,5 +14,6 @@ android/.gradle/
 android/local.properties
 android/**/build/
 android/**/.cxx/
+android/model-packs/
 android/optional/whisper/models/*.bin
 android/.idea/

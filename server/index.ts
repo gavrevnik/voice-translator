@@ -28,7 +28,7 @@ app.use(express.json({ limit: "32kb" }));
 app.get("/api/config", (_request, response) => {
   response.json({
     languages: languageRegistry,
-    defaultProvider: "codex",
+    defaultProvider: "gemini",
     models: ["gpt-5.6-luna"],
     geminiModels: ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"],
     defaultModel: config.codexModel,

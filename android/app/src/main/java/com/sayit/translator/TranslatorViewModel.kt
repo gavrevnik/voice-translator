@@ -1,6 +1,7 @@
 package com.sayit.translator
 
 import android.app.Application
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
@@ -18,6 +19,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private val settings = AppSettings(application)
     private val openAiTranslationProvider: TranslationProvider = OpenAiTranslationProvider()
     private val geminiTranslationProvider: TranslationProvider = GeminiTranslationProvider()
+    private val offlineModelManager = OfflineModelManager(application)
+    private val offlineTranslationProvider =
+        OfflineOpusTranslationProvider(application, offlineModelManager)
     private val systemTtsProvider: TtsProvider = SystemTtsProvider(application)
     private val geminiTtsProvider: TtsProvider = GeminiTtsProvider(BuildConfig.GEMINI_API_KEY)
     private val systemProvider = SystemSttProvider(application)
@@ -31,15 +35,25 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         TranslatorUiState(
             languageA = settings.languageA,
             languageB = settings.languageB,
-            model = settings.model,
-            geminiModel = settings.geminiModel,
-            translationEngine = settings.translationEngine,
             ttsEngine = settings.ttsEngine,
             sttEngine = settings.sttEngine,
+            serbianScript = settings.serbianScript,
+            offlineModelStatus = offlineModelManager.status.value,
+            offlineModelDownloadSizeLabel = offlineModelManager.manifest.downloadSizeLabel,
+            offlineRuntimeAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+                Build.SUPPORTED_ABIS.any { it == "arm64-v8a" },
             hasOpenAiApiKey = apiKeyStore.hasKey(),
         ),
     )
     val uiState: StateFlow<TranslatorUiState> = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            offlineModelManager.status.collect { modelStatus ->
+                _uiState.update { it.copy(offlineModelStatus = modelStatus) }
+            }
+        }
+    }
 
     fun tapMicrophone(side: LanguageSide) {
         val state = _uiState.value
@@ -68,15 +82,28 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
         settings.languageA = nextA
         settings.languageB = nextB
+        val offlineBecameUnavailable =
+            current.translationEngine == TranslationEngine.OFFLINE_OPUS &&
+                !isOfflineOpusDirection(nextA, nextB)
         _uiState.update {
             it.copy(
                 languageA = nextA,
                 languageB = nextB,
+                translationEngine = if (offlineBecameUnavailable) {
+                    TranslationEngine.GEMINI
+                } else {
+                    it.translationEngine
+                },
+                geminiModel = if (offlineBecameUnavailable) {
+                    GeminiTranslationModel.FLASH_3_1_LITE
+                } else {
+                    it.geminiModel
+                },
                 textA = "",
                 textB = "",
                 resultSide = null,
-                status = VoiceStatus.READY,
-                error = null,
+                status = if (offlineBecameUnavailable) VoiceStatus.ERROR else VoiceStatus.READY,
+                error = if (offlineBecameUnavailable) OFFLINE_PAIR_MESSAGE else null,
             )
         }
     }
@@ -101,9 +128,18 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setTranslationOption(option: TranslationOption) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
-        settings.translationEngine = option.engine
-        option.openAiModel?.let { settings.model = it }
-        option.geminiModel?.let { settings.geminiModel = it }
+        val state = _uiState.value
+        if (option.engine == TranslationEngine.OFFLINE_OPUS && !state.offlineRuntimeAvailable) {
+            _uiState.update { it.copy(status = VoiceStatus.ERROR, error = OFFLINE_RUNTIME_MESSAGE) }
+            return
+        }
+        if (
+            option.engine == TranslationEngine.OFFLINE_OPUS &&
+            !isOfflineOpusDirection(state.languageA, state.languageB)
+        ) {
+            _uiState.update { it.copy(status = VoiceStatus.ERROR, error = OFFLINE_PAIR_MESSAGE) }
+            return
+        }
         _uiState.update {
             it.copy(
                 translationEngine = option.engine,
@@ -111,6 +147,24 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 geminiModel = option.geminiModel ?: it.geminiModel,
                 error = null,
             )
+        }
+    }
+
+    fun setSerbianScript(script: SerbianScript) {
+        if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
+        settings.serbianScript = script
+        _uiState.update { it.copy(serbianScript = script, status = VoiceStatus.READY, error = null) }
+    }
+
+    fun downloadOfflineModel() {
+        if (_uiState.value.offlineModelStatus is OfflineModelStatus.Downloading) return
+        viewModelScope.launch { offlineModelManager.downloadAndInstall() }
+    }
+
+    fun deleteOfflineModel() {
+        viewModelScope.launch {
+            offlineTranslationProvider.close()
+            offlineModelManager.deleteModel()
         }
     }
 
@@ -192,6 +246,20 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         if (state.translationEngine == TranslationEngine.GEMINI && BuildConfig.GEMINI_API_KEY.isBlank()) {
             showError(IllegalStateException("Gemini API key is not configured in this build."))
             return
+        }
+        if (state.translationEngine == TranslationEngine.OFFLINE_OPUS) {
+            if (!state.offlineRuntimeAvailable) {
+                showError(IllegalStateException(OFFLINE_RUNTIME_MESSAGE))
+                return
+            }
+            if (!isOfflineOpusDirection(state.languageA, state.languageB)) {
+                showError(IllegalStateException(OFFLINE_PAIR_MESSAGE))
+                return
+            }
+            if (state.offlineModelStatus !is OfflineModelStatus.Installed) {
+                showError(IllegalStateException("Download the offline OPUS model in Settings first."))
+                return
+            }
         }
         if (state.ttsEngine == TtsEngine.GEMINI && BuildConfig.GEMINI_API_KEY.isBlank()) {
             showError(IllegalStateException("Gemini API key is required for Gemini TTS."))
@@ -275,11 +343,13 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 val translationProvider = when (snapshot.translationEngine) {
                     TranslationEngine.OPENAI -> openAiTranslationProvider
                     TranslationEngine.GEMINI -> geminiTranslationProvider
+                    TranslationEngine.OFFLINE_OPUS -> offlineTranslationProvider
                 }
                 val apiKey = when (snapshot.translationEngine) {
                     TranslationEngine.OPENAI -> apiKeyStore.load()
                         ?: error("The saved OpenAI API key could not be read. Save it again in settings.")
                     TranslationEngine.GEMINI -> BuildConfig.GEMINI_API_KEY
+                    TranslationEngine.OFFLINE_OPUS -> ""
                 }
                 _uiState.update { it.copy(status = VoiceStatus.TRANSLATING) }
                 val translationStartedAt = SystemClock.elapsedRealtime()
@@ -290,6 +360,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                     transcript = transcript,
                     model = snapshot.model,
                     geminiModel = snapshot.geminiModel,
+                    serbianScript = snapshot.serbianScript,
                 )
                 logTiming(
                     "translation_${snapshot.translationEngine.name.lowercase()}",
@@ -362,6 +433,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         groqProvider.cancel()
         systemTtsProvider.release()
         geminiTtsProvider.release()
+        offlineTranslationProvider.close()
         super.onCleared()
     }
 
@@ -376,5 +448,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     private companion object {
         const val TIMING_TAG = "SayItTiming"
+        const val OFFLINE_PAIR_MESSAGE =
+            "Offline OPUS supports Russian ↔ Serbian only. Choose a cloud model for this pair."
+        const val OFFLINE_RUNTIME_MESSAGE =
+            "Offline OPUS requires an arm64 phone running Android 9 or newer."
     }
 }
