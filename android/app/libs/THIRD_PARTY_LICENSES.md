@@ -5,8 +5,12 @@
 `whisperlib-release.aar` contains `whisper.cpp` and its GGML runtime, built from
 commit `da54572229bcf64ba367d96c7ef15770376c4280`. They are distributed under the
 MIT License; the complete upstream text is included as
-[`LICENSE.whisper.cpp`](LICENSE.whisper.cpp). Model weights are not bundled in
-the AAR or APK and are delivered separately as a GitHub Release asset.
+[`LICENSE.whisper.cpp`](LICENSE.whisper.cpp). The Large V3 Turbo model weights
+are not bundled in the AAR or APK and are delivered separately as a GitHub
+Release asset. The APK does bundle the small Silero VAD v6.2.0 GGML model used
+only to locate outer speech boundaries. Silero VAD is distributed under the MIT
+License; its complete upstream text is included as
+[`LICENSE.silero-vad`](LICENSE.silero-vad).
 
 ## Translation runtime
 

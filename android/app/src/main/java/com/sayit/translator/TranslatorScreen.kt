@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
@@ -125,6 +126,13 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             onDownloadWhisperModel = viewModel::downloadWhisperModel,
             onDeleteWhisperModel = viewModel::deleteWhisperModel,
             onSttEngine = viewModel::setSttEngine,
+            onExportLogs = {
+                viewModel.createDiagnosticsShareIntent()?.let { shareIntent ->
+                    context.startActivity(
+                        Intent.createChooser(shareIntent, "Share last cycle logs"),
+                    )
+                }
+            },
             onBack = { settingsOpen = false },
         )
         return
@@ -724,6 +732,7 @@ private fun SettingsScreen(
     onDownloadWhisperModel: () -> Unit,
     onDeleteWhisperModel: () -> Unit,
     onSttEngine: (SttEngine) -> Unit,
+    onExportLogs: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -786,7 +795,7 @@ private fun SettingsScreen(
                     state.sttEngine.isWhisperOffline()
                 ) {
                     OfflineModelPanel(
-                        title = "Whisper Small Multilingual Q5_1",
+                        title = "Whisper Large V3 Turbo Q4_0",
                         subtitle = when (state.sttEngine) {
                             SttEngine.AUTO ->
                                 "Offline Live fallback when Android STT and internet are unavailable"
@@ -908,6 +917,37 @@ private fun SettingsScreen(
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(BILLING_URL)))
                         },
                     ) { Text("Billing") }
+                }
+            }
+
+            SettingsSection(
+                title = "Diagnostics",
+            ) {
+                Text(
+                    text = "Exports the latest voice cycle only. Audio, speech text, " +
+                        "translations, and API keys are not included.",
+                    color = SayItMuted,
+                    fontSize = 13.sp,
+                )
+                OutlinedButton(
+                    onClick = onExportLogs,
+                    enabled = state.hasLastDiagnostics,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(
+                        Icons.Filled.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Export logs")
+                }
+                if (!state.hasLastDiagnostics) {
+                    Text(
+                        text = "Complete or attempt a voice cycle to create a log.",
+                        color = SayItMuted,
+                        fontSize = 12.sp,
+                    )
                 }
             }
         }

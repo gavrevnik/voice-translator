@@ -6,6 +6,8 @@ import io.github.marcosholgado.translatekit.TranslateKit
 import io.github.marcosholgado.translatekit.TranslationModel as NativeTranslationModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.text.BreakIterator
+import java.util.Locale
 
 class OfflineOpusTranslationProvider(
     context: Context,
@@ -30,10 +32,15 @@ class OfflineOpusTranslationProvider(
         }
         val translation = synchronized(this@OfflineOpusTranslationProvider) {
             val runtimeModel = loadedModel ?: loadModel().also { loadedModel = it }
-            runtimeModel.translate(
-                offlineOpusInput(family, targetLanguage, serbianScript, transcript),
-                isHtml = false,
-            ).text.trim()
+            offlineOpusInputs(
+                family = family,
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                serbianScript = serbianScript,
+                transcript = transcript,
+            ).joinToString(" ") { input ->
+                runtimeModel.translate(input, isHtml = false).text.trim()
+            }.trim()
         }
         check(translation.isNotBlank()) { "Offline OPUS returned an empty translation." }
         TranslationResult(sourceLanguage, targetLanguage, translation)
@@ -94,4 +101,31 @@ internal fun offlineOpusInput(
         }
     }
     return "$targetToken ${transcript.trim()}"
+}
+
+internal fun offlineOpusInputs(
+    family: OfflineOpusFamily,
+    sourceLanguage: AppLanguage,
+    targetLanguage: AppLanguage,
+    serbianScript: SerbianScript,
+    transcript: String,
+): List<String> {
+    val text = transcript.trim()
+    if (text.isEmpty()) return emptyList()
+    val iterator = BreakIterator.getSentenceInstance(
+        Locale.forLanguageTag(sourceLanguage.bcp47),
+    ).apply { setText(text) }
+    val sentences = buildList {
+        var start = iterator.first()
+        var end = iterator.next()
+        while (end != BreakIterator.DONE) {
+            val sentence = text.substring(start, end).trim()
+            if (sentence.isNotEmpty()) add(sentence)
+            start = end
+            end = iterator.next()
+        }
+    }.ifEmpty { listOf(text) }
+    return sentences.map { sentence ->
+        offlineOpusInput(family, targetLanguage, serbianScript, sentence)
+    }
 }

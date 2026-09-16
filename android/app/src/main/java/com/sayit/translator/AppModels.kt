@@ -135,10 +135,11 @@ data class TranslatorUiState(
     val elapsedSeconds: Int = 0,
     val error: String? = null,
     val hasOpenAiApiKey: Boolean = false,
+    val hasLastDiagnostics: Boolean = false,
 )
 
 const val GROQ_STT_MODEL = "whisper-large-v3"
-const val WHISPER_OFFLINE_MODEL = "small-q5_1"
+const val WHISPER_OFFLINE_MODEL = "large-v3-turbo-q4_0"
 const val PLAYBACK_PROGRESS_LABEL = "Android"
 
 fun recognitionProgressLabel(selected: SttEngine, active: SttEngine?): String =

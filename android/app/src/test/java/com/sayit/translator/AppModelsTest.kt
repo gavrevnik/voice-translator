@@ -1,6 +1,7 @@
 package com.sayit.translator
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -52,7 +53,7 @@ class AppModelsTest {
     fun `automatic speech recognition is the default`() {
         assertEquals(SttEngine.AUTO, TranslatorUiState().sttEngine)
         assertEquals("whisper-large-v3", GROQ_STT_MODEL)
-        assertEquals("small-q5_1", WHISPER_OFFLINE_MODEL)
+        assertEquals("large-v3-turbo-q4_0", WHISPER_OFFLINE_MODEL)
         assertEquals(
             setOf(
                 SttEngine.AUTO,
@@ -167,15 +168,18 @@ class AppModelsTest {
     fun `Whisper live config fixes language and uses bounded partial cadence`() {
         val config = WhisperTranscriptionConfig(
             model = WHISPER_OFFLINE_MODEL,
-            threads = 4,
+            threads = WHISPER_INFERENCE_THREADS,
             language = AppLanguage.RUSSIAN.whisperCode,
         )
 
-        assertEquals(1_000L, config.partialUpdateIntervalMs)
-        assertEquals(8, config.slidingWindowSeconds)
-        assertEquals(128_000, config.slidingWindowSamples)
-        assertEquals("small-q5_1", config.model)
+        assertEquals(1_500L, config.partialUpdateIntervalMs)
+        assertEquals(6, config.slidingWindowSeconds)
+        assertEquals(96_000, config.slidingWindowSamples)
+        assertEquals("large-v3-turbo-q4_0", config.model)
         assertEquals("ru", config.language)
+        assertEquals(6, config.threads)
+        assertEquals(6, WHISPER_INFERENCE_THREADS)
+        assertEquals(200L, WHISPER_FINAL_CAPTURE_GRACE_MS)
     }
 
     @Test
@@ -195,6 +199,46 @@ class AppModelsTest {
         assertEquals(
             "hello brave world today and tomorrow",
             assembler.contextPrompt(),
+        )
+    }
+
+    @Test
+    fun `Whisper live keeps Serbian word boundaries when a partial grows`() {
+        val assembler = WhisperPartialTranscriptAssembler()
+
+        assertEquals("Zdravo,", assembler.update("Zdravo,"))
+        assertEquals("Zdravo, kako si?", assembler.update("Zdravo, kako si?"))
+    }
+
+    @Test
+    fun `Whisper live throttles an inference that overruns its cadence`() {
+        assertEquals(900L, livePartialDelayMs(600L, 1_500L))
+        assertEquals(500L, livePartialDelayMs(1_500L, 1_500L))
+        assertEquals(1_500L, livePartialDelayMs(6_000L, 1_500L))
+    }
+
+    @Test
+    fun `Whisper VAD trims only outer silence and keeps safety padding`() {
+        val samples = FloatArray(64_000) { it.toFloat() }
+
+        val trimmed = trimToOuterSpeech(
+            samples = samples,
+            speechBounds = longArrayOf(16_000, 32_000),
+        )
+
+        assertEquals(25_600, trimmed.size)
+        assertEquals(12_000f, trimmed.first())
+        assertEquals(37_599f, trimmed.last())
+    }
+
+    @Test
+    fun `Whisper VAD keeps original audio when detection is absent or saves too little`() {
+        val samples = FloatArray(32_000)
+
+        assertSame(samples, trimToOuterSpeech(samples, null))
+        assertSame(
+            samples,
+            trimToOuterSpeech(samples, longArrayOf(1_000, 31_000)),
         )
     }
 
@@ -296,6 +340,15 @@ class AppModelsTest {
             ),
         )
         assertEquals(
+            ">>rus<< Zdravo, kako si?",
+            offlineOpusInput(
+                OfflineOpusFamily.SLAVIC,
+                AppLanguage.RUSSIAN,
+                SerbianScript.LATIN,
+                "Zdravo, kako si?",
+            ),
+        )
+        assertEquals(
             ">>hrv<< Где находится вокзал?",
             offlineOpusInput(
                 OfflineOpusFamily.SLAVIC,
@@ -330,6 +383,35 @@ class AppModelsTest {
                 SerbianScript.LATIN,
                 "Unde este gara?",
             ),
+        )
+    }
+
+    @Test
+    fun `offline OPUS reapplies the target token to every sentence`() {
+        val transcript =
+            "Сегодня я немного устал. Если погода будет хорошая, ещё немного прогуляюсь."
+
+        assertEquals(
+            listOf(
+                ">>hrv<< Сегодня я немного устал.",
+                ">>hrv<< Если погода будет хорошая, ещё немного прогуляюсь.",
+            ),
+            offlineOpusInputs(
+                family = OfflineOpusFamily.SLAVIC,
+                sourceLanguage = AppLanguage.RUSSIAN,
+                targetLanguage = AppLanguage.CROATIAN,
+                serbianScript = SerbianScript.LATIN,
+                transcript = transcript,
+            ),
+        )
+        assertTrue(
+            offlineOpusInputs(
+                family = OfflineOpusFamily.INDO_EUROPEAN,
+                sourceLanguage = AppLanguage.RUSSIAN,
+                targetLanguage = AppLanguage.ROMANIAN,
+                serbianScript = SerbianScript.LATIN,
+                transcript = transcript,
+            ).all { it.startsWith(">>ron<< ") },
         )
     }
 

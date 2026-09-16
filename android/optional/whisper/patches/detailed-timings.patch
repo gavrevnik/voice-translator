@@ -1,0 +1,68 @@
+diff --git a/include/whisper.h b/include/whisper.h
+index 545084ef..1db885fc 100644
+--- a/include/whisper.h
++++ b/include/whisper.h
+@@ -443,6 +443,27 @@ extern "C" {
+         float prompt_ms;
+     };
+     WHISPER_API struct whisper_timings * whisper_get_timings(struct whisper_context * ctx);
++
++    // Detailed totals and run counts for the most recent inference after
++    // whisper_reset_timings(). Callers provide the output storage.
++    struct whisper_detailed_timings {
++        int64_t mel_us;
++        int64_t sample_us;
++        int64_t encode_us;
++        int64_t decode_us;
++        int64_t batchd_us;
++        int64_t prompt_us;
++        int32_t sample_runs;
++        int32_t encode_runs;
++        int32_t decode_runs;
++        int32_t batchd_runs;
++        int32_t prompt_runs;
++        int32_t fallback_prompt_runs;
++        int32_t fallback_hallucination_runs;
++    };
++    WHISPER_API bool whisper_get_detailed_timings(
++            struct whisper_context * ctx,
++            struct whisper_detailed_timings * timings);
+     WHISPER_API void whisper_print_timings(struct whisper_context * ctx);
+     WHISPER_API void whisper_reset_timings(struct whisper_context * ctx);
+-
++
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 662f8064..cbd9926d 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -4359,6 +4359,28 @@ struct whisper_timings * whisper_get_timings(struct whisper_context * ctx) {
+     return timings;
+ }
+-
++
++bool whisper_get_detailed_timings(
++        struct whisper_context * ctx,
++        struct whisper_detailed_timings * timings) {
++    if (ctx == nullptr || ctx->state == nullptr || timings == nullptr) {
++        return false;
++    }
++    timings->mel_us = ctx->state->t_mel_us;
++    timings->sample_us = ctx->state->t_sample_us;
++    timings->encode_us = ctx->state->t_encode_us;
++    timings->decode_us = ctx->state->t_decode_us;
++    timings->batchd_us = ctx->state->t_batchd_us;
++    timings->prompt_us = ctx->state->t_prompt_us;
++    timings->sample_runs = ctx->state->n_sample;
++    timings->encode_runs = ctx->state->n_encode;
++    timings->decode_runs = ctx->state->n_decode;
++    timings->batchd_runs = ctx->state->n_batchd;
++    timings->prompt_runs = ctx->state->n_prompt;
++    timings->fallback_prompt_runs = ctx->state->n_fail_p;
++    timings->fallback_hallucination_runs = ctx->state->n_fail_h;
++    return true;
++}
++
+ void whisper_print_timings(struct whisper_context * ctx) {
+     const int64_t t_end_us = ggml_time_us();
+-
++

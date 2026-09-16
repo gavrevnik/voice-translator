@@ -9,13 +9,11 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import com.whispercpp.whisper.WhisperContext
-import com.whispercpp.whisper.WhisperCpuConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -28,7 +26,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
 
-class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttProvider {
+class WhisperSttProvider(
+    private val modelManager: WhisperModelManager,
+    private val diagnosticEvent: DiagnosticEvent = { _, _ -> },
+) : SttProvider {
     private val audioRecorder = WhisperPcmAudioRecorder()
     private val liveScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val inferenceMutex = Mutex()
@@ -37,9 +38,10 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
     private var partialResult: (String) -> Unit = {}
     private var sessionConfig = WhisperTranscriptionConfig(
         model = WHISPER_OFFLINE_MODEL,
-        threads = 2,
+        threads = WHISPER_INFERENCE_THREADS,
         language = AppLanguage.ENGLISH.whisperCode,
     )
+    @Volatile
     private var whisperContext: WhisperContext? = null
 
     fun setLivePartialsEnabled(enabled: Boolean) {
@@ -47,10 +49,28 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
         livePartialsEnabled = enabled
     }
 
+    suspend fun prepare(): Unit = withContext(Dispatchers.Default) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val wasLoaded = whisperContext != null
+        ensureWhisperContext()
+        val durationMs = SystemClock.elapsedRealtime() - startedAt
+        Log.i(
+            TIMING_TAG,
+            "stage=whisper_model_prepare duration_ms=$durationMs warm=$wasLoaded",
+        )
+        diagnosticEvent(
+            "whisper_model_prepare",
+            mapOf(
+                "duration_ms" to durationMs.toString(),
+                "context_already_loaded" to wasLoaded.toString(),
+            ),
+        )
+    }
+
     override suspend fun start(language: AppLanguage, onPartialResult: (String) -> Unit) {
         val config = WhisperTranscriptionConfig(
             model = WHISPER_OFFLINE_MODEL,
-            threads = WhisperCpuConfig.preferredThreadCount.coerceAtLeast(2),
+            threads = WHISPER_INFERENCE_THREADS,
             language = language.whisperCode,
         )
         check(modelManager.manifest.id.endsWith(config.model)) {
@@ -68,6 +88,20 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
                 "partial_interval_ms=${config.partialUpdateIntervalMs} " +
                 "sliding_window_seconds=${config.slidingWindowSeconds}",
         )
+        diagnosticEvent(
+            "whisper_session_started",
+            mapOf(
+                "live" to livePartialsEnabled.toString(),
+                "model" to config.model,
+                "language" to config.language,
+                "threads" to config.threads.toString(),
+                "partial_interval_ms" to config.partialUpdateIntervalMs.toString(),
+                "rolling_window_seconds" to config.slidingWindowSeconds.toString(),
+                "final_beam_size" to WHISPER_FINAL_BEAM_SIZE.toString(),
+                "final_timestamps" to "false",
+                "final_temperature_fallback" to "false",
+            ),
+        )
         if (livePartialsEnabled) {
             livePartialJob = liveScope.launch { runLivePartialLoop(config) }
         }
@@ -75,27 +109,47 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
 
     override suspend fun stop(): String = withContext(Dispatchers.Default) {
         val stopTappedAt = SystemClock.elapsedRealtime()
+        delay(WHISPER_FINAL_CAPTURE_GRACE_MS)
         val samples = audioRecorder.stop()
-        livePartialJob?.cancelAndJoin()
+        val partialJob = livePartialJob
+        partialJob?.cancel()
+        whisperContext?.requestAbort()
+        partialJob?.join()
         livePartialJob = null
         partialResult = {}
         if (samples.isEmpty()) error("No audio was recorded.")
+        val decodeSamples = trimOuterSilence(samples, sessionConfig)
         val startedAt = SystemClock.elapsedRealtime()
         val cpuStartedAt = Process.getElapsedCpuTime()
         val transcript = transcribe(
-            samples = samples,
+            samples = decodeSamples,
             config = sessionConfig,
             initialPrompt = null,
             finalDecode = true,
         ).trim().ifBlank {
             error("Whisper could not recognize speech. Try speaking closer to the phone.")
         }
+        val durationMs = SystemClock.elapsedRealtime() - startedAt
+        val stopToFinalMs = SystemClock.elapsedRealtime() - stopTappedAt
+        val cpuMs = Process.getElapsedCpuTime() - cpuStartedAt
         Log.i(
             TIMING_TAG,
-            "stage=whisper_final_decode duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
-                "stop_to_final_ms=${SystemClock.elapsedRealtime() - stopTappedAt} " +
-                "cpu_ms=${Process.getElapsedCpuTime() - cpuStartedAt} pss_kb=${Debug.getPss()} " +
-                "audio_seconds=${samples.size / SAMPLE_RATE.toFloat()}",
+            "stage=whisper_final_decode duration_ms=$durationMs " +
+                "stop_to_final_ms=$stopToFinalMs " +
+                "cpu_ms=$cpuMs pss_kb=${Debug.getPss()} " +
+                "input_audio_seconds=${samples.size / SAMPLE_RATE.toFloat()} " +
+                "decode_audio_seconds=${decodeSamples.size / SAMPLE_RATE.toFloat()}",
+        )
+        diagnosticEvent(
+            "whisper_final_decode",
+            mapOf(
+                "duration_ms" to durationMs.toString(),
+                "stop_to_final_ms" to stopToFinalMs.toString(),
+                "cpu_ms" to cpuMs.toString(),
+                "pss_kb" to Debug.getPss().toString(),
+                "input_audio_ms" to samplesToMilliseconds(samples.size).toString(),
+                "decode_audio_ms" to samplesToMilliseconds(decodeSamples.size).toString(),
+            ),
         )
         deduplicateWhisperTranscript(transcript)
     }
@@ -103,13 +157,17 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
     override fun cancel() {
         partialResult = {}
         livePartialJob?.cancel()
+        whisperContext?.requestAbort()
         livePartialJob = null
         audioRecorder.cancel()
     }
 
     suspend fun release() {
         partialResult = {}
-        livePartialJob?.cancelAndJoin()
+        val partialJob = livePartialJob
+        partialJob?.cancel()
+        whisperContext?.requestAbort()
+        partialJob?.join()
         livePartialJob = null
         inferenceMutex.withLock {
             whisperContext?.release()
@@ -170,20 +228,40 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
                                 "overrun_ms=${max(0L, completedAt - cycleStartedAt - config.partialUpdateIntervalMs)} " +
                                 "pending_inferences=0",
                         )
+                        diagnosticEvent(
+                            "whisper_live_partial",
+                            mapOf(
+                                "result" to resultCount.toString(),
+                                "decode_ms" to (completedAt - cycleStartedAt).toString(),
+                                "first_latency_ms" to firstResultLatencyMs.toString(),
+                                "average_update_interval_ms" to
+                                    averageInterval(intervalTotalMs, resultCount).toString(),
+                                "cpu_ms" to
+                                    (Process.getElapsedCpuTime() - cpuStartedAt).toString(),
+                                "window_audio_ms" to
+                                    samplesToMilliseconds(snapshot.samples.size).toString(),
+                                "overrun_ms" to max(
+                                    0L,
+                                    completedAt - cycleStartedAt - config.partialUpdateIntervalMs,
+                                ).toString(),
+                            ),
+                        )
                     }
                 }
                 val cycleDurationMs = SystemClock.elapsedRealtime() - cycleStartedAt
-                delay(
-                    max(
-                        MIN_PARTIAL_COOLDOWN_MS,
-                        config.partialUpdateIntervalMs - cycleDurationMs,
-                    ),
-                )
+                delay(livePartialDelayMs(cycleDurationMs, config.partialUpdateIntervalMs))
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (throwable: Throwable) {
             Log.w(TIMING_TAG, "Whisper live partial decoding stopped; final decode remains available.", throwable)
+            diagnosticEvent(
+                "whisper_live_partial_failed",
+                mapOf(
+                    "error_type" to throwable.javaClass.simpleName,
+                    "error_message" to (throwable.message ?: "Unknown error"),
+                ),
+            )
         }
     }
 
@@ -193,13 +271,87 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
         initialPrompt: String?,
         finalDecode: Boolean,
     ): String = inferenceMutex.withLock {
-        ensureWhisperContextLocked().transcribeData(
+        val context = ensureWhisperContextLocked()
+        val text = context.transcribeData(
             data = samples,
             language = config.language,
             numThreads = config.threads,
             initialPrompt = initialPrompt,
             finalDecode = finalDecode,
         )
+        val timings = context.detailedTimings()
+        val timingFields = mapOf(
+            "mode" to if (finalDecode) "final" else "partial",
+            "mel_ms" to microsecondsToMilliseconds(timings.melUs),
+            "sample_ms" to microsecondsToMilliseconds(timings.sampleUs),
+            "sample_runs" to timings.sampleRuns.toString(),
+            "encode_ms" to microsecondsToMilliseconds(timings.encodeUs),
+            "encode_runs" to timings.encodeRuns.toString(),
+            "decode_ms" to microsecondsToMilliseconds(timings.decodeUs),
+            "decode_runs" to timings.decodeRuns.toString(),
+            "batch_decode_ms" to microsecondsToMilliseconds(timings.batchdUs),
+            "batch_decode_runs" to timings.batchdRuns.toString(),
+            "prompt_ms" to microsecondsToMilliseconds(timings.promptUs),
+            "prompt_runs" to timings.promptRuns.toString(),
+            "fallback_prompt_runs" to timings.fallbackPromptRuns.toString(),
+            "fallback_hallucination_runs" to
+                timings.fallbackHallucinationRuns.toString(),
+        )
+        diagnosticEvent("whisper_native_timings", timingFields)
+        Log.i(
+            TIMING_TAG,
+            "stage=whisper_native_timings " +
+                timingFields.entries.joinToString(" ") { (key, value) -> "$key=$value" },
+        )
+        text
+    }
+
+    private suspend fun trimOuterSilence(
+        samples: FloatArray,
+        config: WhisperTranscriptionConfig,
+    ): FloatArray {
+        val startedAt = SystemClock.elapsedRealtime()
+        val speechBounds = runCatching {
+            val vadModel = modelManager.installedVadModel()
+            inferenceMutex.withLock {
+                ensureWhisperContextLocked().detectSpeechBounds(
+                    data = samples,
+                    vadModelPath = vadModel.absolutePath,
+                    numThreads = config.threads,
+                    threshold = WHISPER_VAD_THRESHOLD,
+                    minSpeechDurationMs = WHISPER_VAD_MIN_SPEECH_MS,
+                    minSilenceDurationMs = WHISPER_VAD_MIN_SILENCE_MS,
+                )
+            }
+        }.onFailure {
+            Log.w(TIMING_TAG, "Whisper VAD failed; using the complete recording.", it)
+            diagnosticEvent(
+                "whisper_vad_failed",
+                mapOf(
+                    "error_type" to it.javaClass.simpleName,
+                    "error_message" to (it.message ?: "Unknown error"),
+                ),
+            )
+        }.getOrNull()
+        val trimmed = trimToOuterSpeech(samples, speechBounds)
+        val durationMs = SystemClock.elapsedRealtime() - startedAt
+        Log.i(
+            TIMING_TAG,
+            "stage=whisper_vad duration_ms=$durationMs " +
+                "applied=${trimmed !== samples} " +
+                "input_audio_seconds=${samples.size / SAMPLE_RATE.toFloat()} " +
+                "decode_audio_seconds=${trimmed.size / SAMPLE_RATE.toFloat()}",
+        )
+        diagnosticEvent(
+            "whisper_vad",
+            mapOf(
+                "duration_ms" to durationMs.toString(),
+                "applied" to (trimmed !== samples).toString(),
+                "input_audio_ms" to samplesToMilliseconds(samples.size).toString(),
+                "decode_audio_ms" to samplesToMilliseconds(trimmed.size).toString(),
+            ),
+        )
+        return trimmed
     }
 
     private suspend fun ensureWhisperContext() {
@@ -213,17 +365,23 @@ class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttPro
 
     private fun averageInterval(intervalTotalMs: Long, resultCount: Int): Long =
         if (resultCount <= 1) 0L else intervalTotalMs / (resultCount - 1)
+
+    private fun samplesToMilliseconds(sampleCount: Int): Long =
+        sampleCount * 1_000L / SAMPLE_RATE
+
+    private fun microsecondsToMilliseconds(microseconds: Long): String =
+        String.format(java.util.Locale.US, "%.2f", microseconds / 1_000.0)
 }
 
 internal data class WhisperTranscriptionConfig(
-    val partialUpdateIntervalMs: Long = 1_000L,
-    val slidingWindowSeconds: Int = 8,
+    val partialUpdateIntervalMs: Long = 1_500L,
+    val slidingWindowSeconds: Int = 6,
     val model: String,
     val threads: Int,
     val language: String,
 ) {
     init {
-        require(partialUpdateIntervalMs in 800L..1_200L)
+        require(partialUpdateIntervalMs in 1_000L..3_000L)
         require(slidingWindowSeconds in 5..10)
         require(model.isNotBlank())
         require(threads > 0)
@@ -270,6 +428,37 @@ internal fun deduplicateWhisperTranscript(transcript: String): String {
     return if (isDuplicate) firstHalf.joinToString(" ") else transcript.trim()
 }
 
+internal fun livePartialDelayMs(cycleDurationMs: Long, targetIntervalMs: Long): Long =
+    if (cycleDurationMs < targetIntervalMs) {
+        max(MIN_PARTIAL_COOLDOWN_MS, targetIntervalMs - cycleDurationMs)
+    } else {
+        // Turbo can take longer than the target cadence on a phone. Give the
+        // CPU a bounded cooldown instead of immediately starting another pass.
+        (cycleDurationMs / 4).coerceIn(
+            MIN_OVERRUN_COOLDOWN_MS,
+            targetIntervalMs,
+        )
+    }
+
+internal fun trimToOuterSpeech(
+    samples: FloatArray,
+    speechBounds: LongArray?,
+    sampleRate: Int = SAMPLE_RATE,
+    preRollMs: Int = WHISPER_VAD_PRE_ROLL_MS,
+    postRollMs: Int = WHISPER_VAD_POST_ROLL_MS,
+    minSavedMs: Int = WHISPER_VAD_MIN_SAVED_MS,
+): FloatArray {
+    if (speechBounds == null || speechBounds.size != 2 || samples.isEmpty()) return samples
+    val speechStart = speechBounds[0].coerceIn(0L, samples.size.toLong()).toInt()
+    val speechEnd = speechBounds[1].coerceIn(0L, samples.size.toLong()).toInt()
+    if (speechEnd <= speechStart) return samples
+    val trimStart = (speechStart - preRollMs * sampleRate / 1_000).coerceAtLeast(0)
+    val trimEnd = (speechEnd + postRollMs * sampleRate / 1_000).coerceAtMost(samples.size)
+    val savedSamples = samples.size - (trimEnd - trimStart)
+    if (savedSamples < minSavedMs * sampleRate / 1_000) return samples
+    return samples.copyOfRange(trimStart, trimEnd)
+}
+
 private fun normalizeWhisperWord(word: String): String =
     word.trim().trim('.', ',', '!', '?', ':', ';', '«', '»', '"').lowercase()
 
@@ -279,9 +468,19 @@ private fun normalizedWhisperText(text: String): String = text
     .trim()
 
 private const val MIN_DUPLICATE_WORD_COUNT = 2
-private const val SAMPLE_RATE = 16_000
+internal const val SAMPLE_RATE = 16_000
+internal const val WHISPER_INFERENCE_THREADS = 6
+internal const val WHISPER_FINAL_BEAM_SIZE = 3
+internal const val WHISPER_FINAL_CAPTURE_GRACE_MS = 200L
+internal const val WHISPER_VAD_THRESHOLD = 0.5f
+internal const val WHISPER_VAD_MIN_SPEECH_MS = 150
+internal const val WHISPER_VAD_MIN_SILENCE_MS = 300
+internal const val WHISPER_VAD_PRE_ROLL_MS = 250
+internal const val WHISPER_VAD_POST_ROLL_MS = 350
+internal const val WHISPER_VAD_MIN_SAVED_MS = 500
 private const val MIN_PARTIAL_SAMPLES = SAMPLE_RATE * 4 / 5
 private const val MIN_PARTIAL_COOLDOWN_MS = 150L
+private const val MIN_OVERRUN_COOLDOWN_MS = 500L
 private const val MAX_INITIAL_PROMPT_CHARS = 400
 private const val TIMING_TAG = "SayItTiming"
 

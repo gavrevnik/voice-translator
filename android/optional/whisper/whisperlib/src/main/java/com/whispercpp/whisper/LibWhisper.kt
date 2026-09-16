@@ -10,11 +10,12 @@ import java.util.concurrent.Executors
 
 private const val LOG_TAG = "LibWhisper"
 
-class WhisperContext private constructor(private var ptr: Long) {
+class WhisperContext private constructor(@Volatile private var ptr: Long) {
     // Meet Whisper C++ constraint: Don't access from more than one thread at a time.
     private val scope: CoroutineScope = CoroutineScope(
         Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     )
+    @Volatile private var lastDetailedTimings = WhisperDetailedTimings.EMPTY
 
     suspend fun transcribeData(
         data: FloatArray,
@@ -36,6 +37,9 @@ class WhisperContext private constructor(private var ptr: Long) {
                 finalDecode,
             ) == 0,
         ) { "Whisper failed to transcribe audio." }
+        lastDetailedTimings = WhisperDetailedTimings.fromNative(
+            WhisperLib.getDetailedTimings(ptr),
+        )
         val textCount = WhisperLib.getTextSegmentCount(ptr)
         return@withContext buildString {
             for (i in 0 until textCount) {
@@ -48,6 +52,38 @@ class WhisperContext private constructor(private var ptr: Long) {
                 }
             }
         }
+    }
+
+    fun detailedTimings(): WhisperDetailedTimings = lastDetailedTimings
+
+    /**
+     * Interrupts a native decode without waiting for the single-thread executor.
+     * This must stay synchronous: queuing it on [scope] would put it behind the
+     * very inference that needs to be stopped.
+     */
+    fun requestAbort() {
+        val contextPtr = ptr
+        if (contextPtr != 0L) WhisperLib.requestAbort(contextPtr)
+    }
+
+    suspend fun detectSpeechBounds(
+        data: FloatArray,
+        vadModelPath: String,
+        numThreads: Int,
+        threshold: Float,
+        minSpeechDurationMs: Int,
+        minSilenceDurationMs: Int,
+    ): LongArray? = withContext(scope.coroutineContext) {
+        require(ptr != 0L)
+        WhisperLib.detectSpeechBounds(
+            ptr,
+            data,
+            vadModelPath,
+            numThreads,
+            threshold,
+            minSpeechDurationMs,
+            minSilenceDurationMs,
+        ).takeIf { it.size == 2 && it[1] > it[0] }
     }
 
     suspend fun benchMemory(nthreads: Int): String = withContext(scope.coroutineContext) {
@@ -157,6 +193,17 @@ private class WhisperLib {
             initialPrompt: String?,
             finalDecode: Boolean,
         ): Int
+        external fun requestAbort(contextPtr: Long)
+        external fun getDetailedTimings(contextPtr: Long): LongArray
+        external fun detectSpeechBounds(
+            contextPtr: Long,
+            audioData: FloatArray,
+            vadModelPath: String,
+            numThreads: Int,
+            threshold: Float,
+            minSpeechDurationMs: Int,
+            minSilenceDurationMs: Int,
+        ): LongArray
         external fun getTextSegmentCount(contextPtr: Long): Int
         external fun getTextSegment(contextPtr: Long, index: Int): String
         external fun getTextSegmentT0(contextPtr: Long, index: Int): Long
@@ -164,6 +211,59 @@ private class WhisperLib {
         external fun getSystemInfo(): String
         external fun benchMemcpy(nthread: Int): String
         external fun benchGgmlMulMat(nthread: Int): String
+    }
+}
+
+data class WhisperDetailedTimings(
+    val melUs: Long,
+    val sampleUs: Long,
+    val encodeUs: Long,
+    val decodeUs: Long,
+    val batchdUs: Long,
+    val promptUs: Long,
+    val sampleRuns: Long,
+    val encodeRuns: Long,
+    val decodeRuns: Long,
+    val batchdRuns: Long,
+    val promptRuns: Long,
+    val fallbackPromptRuns: Long,
+    val fallbackHallucinationRuns: Long,
+) {
+    companion object {
+        val EMPTY = WhisperDetailedTimings(
+            melUs = 0,
+            sampleUs = 0,
+            encodeUs = 0,
+            decodeUs = 0,
+            batchdUs = 0,
+            promptUs = 0,
+            sampleRuns = 0,
+            encodeRuns = 0,
+            decodeRuns = 0,
+            batchdRuns = 0,
+            promptRuns = 0,
+            fallbackPromptRuns = 0,
+            fallbackHallucinationRuns = 0,
+        )
+
+        internal fun fromNative(values: LongArray): WhisperDetailedTimings {
+            if (values.size != 13) return EMPTY
+            return WhisperDetailedTimings(
+                melUs = values[0],
+                sampleUs = values[1],
+                encodeUs = values[2],
+                decodeUs = values[3],
+                batchdUs = values[4],
+                promptUs = values[5],
+                sampleRuns = values[6],
+                encodeRuns = values[7],
+                decodeRuns = values[8],
+                batchdRuns = values[9],
+                promptRuns = values[10],
+                fallbackPromptRuns = values[11],
+                fallbackHallucinationRuns = values[12],
+            )
+        }
     }
 }
 

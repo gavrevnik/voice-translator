@@ -12,14 +12,16 @@ Licensing and third-party notices are in this directory.
 
 `whisperlib-release.aar` is an arm64-only `whisper.cpp` runtime built from commit
 `da54572229bcf64ba367d96c7ef15770376c4280`. It contains native inference
-libraries but no model weights. The multilingual `small-q5_1` model is downloaded
+libraries but no model weights. The multilingual `large-v3-turbo-q4_0` model is downloaded
 separately after the user selects Whisper Offline. `whisper.cpp` is MIT licensed;
 the license text is in [`LICENSE.whisper.cpp`](LICENSE.whisper.cpp).
 
-Rebuild the runtime, including the Live partial/final decode JNI options, from
-the `android` directory:
+Rebuild the runtime, including the Live partial/final decode JNI options and
+the exported native stage timings, from the `android` directory:
 
 ```bash
+git -C ../references/whisper.cpp apply \
+  ../../android/optional/whisper/patches/detailed-timings.patch
 ./gradlew -p optional/whisper :whisperlib:assembleRelease
 cp optional/whisper/whisperlib/build/outputs/aar/whisperlib-release.aar \
   app/libs/whisperlib-release.aar

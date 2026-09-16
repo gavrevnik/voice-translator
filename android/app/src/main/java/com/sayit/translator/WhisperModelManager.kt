@@ -65,12 +65,17 @@ class WhisperModelManager(
     private val appContext = context.applicationContext
     val manifest: WhisperModelManifest = WhisperModelManifest.load(appContext)
     private val modelRoot = File(appContext.filesDir, "offline-models/${manifest.id}").also {
-        File(appContext.filesDir, LEGACY_BASE_MODEL_DIRECTORY)
-            .takeIf { legacyRoot -> legacyRoot != it }
-            ?.deleteRecursively()
+        LEGACY_MODEL_DIRECTORIES.forEach { relativePath ->
+            File(appContext.filesDir, relativePath)
+                .takeIf { legacyRoot -> legacyRoot != it }
+                ?.deleteRecursively()
+        }
     }
     private val installDirectory = File(modelRoot, manifest.version)
     private val modelFile = File(installDirectory, manifest.filename)
+    private val vadDirectory = File(appContext.filesDir, "offline-models/$VAD_MODEL_ID")
+    private val vadModelFile = File(vadDirectory, VAD_MODEL_FILENAME)
+    @Volatile private var vadModelReady = false
     private val _status = MutableStateFlow(inspectInstallation())
     val status: StateFlow<OfflineModelStatus> = _status.asStateFlow()
 
@@ -155,6 +160,33 @@ class WhisperModelManager(
         return modelFile
     }
 
+    fun installedVadModel(): File {
+        if (vadModelReady) return vadModelFile
+        synchronized(this) {
+            if (vadModelReady) return vadModelFile
+            if (
+                !vadModelFile.isFile ||
+                vadModelFile.length() != VAD_MODEL_SIZE ||
+                !OfflineModelIntegrity.matchesChecksum(vadModelFile, VAD_MODEL_SHA256)
+            ) {
+                vadDirectory.mkdirs()
+                val staging = File(vadDirectory, "$VAD_MODEL_FILENAME.staging")
+                staging.delete()
+                appContext.assets.open(VAD_MODEL_ASSET).use { input ->
+                    FileOutputStream(staging).buffered().use { output -> input.copyTo(output) }
+                }
+                check(staging.length() == VAD_MODEL_SIZE) { "Bundled Whisper VAD model has an invalid size." }
+                check(OfflineModelIntegrity.matchesChecksum(staging, VAD_MODEL_SHA256)) {
+                    "Bundled Whisper VAD model checksum mismatch."
+                }
+                vadModelFile.delete()
+                check(staging.renameTo(vadModelFile)) { "Could not install the bundled Whisper VAD model." }
+            }
+            vadModelReady = true
+            return vadModelFile
+        }
+    }
+
     private fun inspectInstallation(): OfflineModelStatus {
         if (!installDirectory.exists()) return OfflineModelStatus.NotInstalled
         val error = validateInstallation()
@@ -177,6 +209,15 @@ class WhisperModelManager(
     }
 
     private companion object {
-        const val LEGACY_BASE_MODEL_DIRECTORY = "offline-models/whisper-base-q5_1"
+        val LEGACY_MODEL_DIRECTORIES = listOf(
+            "offline-models/whisper-base-q5_1",
+            "offline-models/whisper-small-q5_1",
+        )
+        const val VAD_MODEL_ID = "whisper-vad-silero-v6.2.0"
+        const val VAD_MODEL_ASSET = "ggml-silero-v6.2.0.bin"
+        const val VAD_MODEL_FILENAME = "ggml-silero-v6.2.0.bin"
+        const val VAD_MODEL_SIZE = 885_098L
+        const val VAD_MODEL_SHA256 =
+            "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
     }
 }
