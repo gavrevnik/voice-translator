@@ -1,6 +1,7 @@
 package com.sayit.translator
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,14 +9,16 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
+import android.speech.ModelDownloadListener
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -33,6 +36,10 @@ interface SttProvider {
 class SystemSttProvider(private val context: Context) : SttProvider {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
+    private var recognizerComponent: ComponentName? = null
+    private var activeRecognitionServiceName = "Android"
+    private val installedServices = mutableMapOf<AppLanguage, RecognitionServiceCandidate>()
+    private val downloadServices = mutableMapOf<AppLanguage, RecognitionServiceCandidate>()
     private var result = CompletableDeferred<String>()
     private var onPartialResult: (String) -> Unit = {}
     private var activeLanguage: AppLanguage? = null
@@ -50,6 +57,25 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             error("System SpeechRecognizer is unavailable on this device.")
         }
+        val service = preferredInstalledService(language)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && service == null) {
+            val support = inspectOfflineLanguage(language)
+            if (
+                support.availability in setOf(
+                    AndroidLanguagePackAvailability.DOWNLOADABLE,
+                    AndroidLanguagePackAvailability.DOWNLOADING,
+                    AndroidLanguagePackAvailability.SCHEDULED,
+                    AndroidLanguagePackAvailability.ONLINE_ONLY,
+                    AndroidLanguagePackAvailability.UNSUPPORTED,
+                )
+            ) {
+                error(
+                    "Offline ${language.canonicalName} speech is not installed in Samsung or " +
+                        "Google. Use the download link below the progress bar.",
+                )
+            }
+        }
+        configureRecognizer(service)
         result = CompletableDeferred()
         this@SystemSttProvider.onPartialResult = onPartialResult
         activeLanguage = language
@@ -61,29 +87,101 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         startRecognitionSession()
     }
 
-    internal suspend fun offlineLanguageAvailability(language: AppLanguage): AndroidSttAvailability {
+    internal suspend fun inspectOfflineLanguage(
+        language: AppLanguage,
+    ): AndroidLanguagePackStatus {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            return AndroidSttAvailability.UNAVAILABLE
+            return AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNSUPPORTED,
+                detail = "Android speech recognition is unavailable.",
+            )
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return AndroidSttAvailability.UNKNOWN
+            return AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNKNOWN,
+                providerName = "Android",
+                detail = "Android cannot report installed speech packs on this OS version.",
+            )
         }
-        return withTimeoutOrNull(SUPPORT_CHECK_TIMEOUT_MS) {
-            checkRecognitionSupport(language)
-        } ?: AndroidSttAvailability.UNKNOWN
+        val services = recognitionServices()
+        if (services.isEmpty()) {
+            return AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNKNOWN,
+                providerName = "Android",
+                detail = "Android did not expose its installed speech recognition services.",
+            )
+        }
+        val checks = services.map { candidate ->
+            candidate to checkRecognitionSupport(candidate, language)
+        }
+        checks.firstOrNull { (_, status) -> status.isInstalled }?.let { (candidate, status) ->
+            installedServices[language] = candidate
+            downloadServices.remove(language)
+            return status
+        }
+        installedServices.remove(language)
+        checks.firstOrNull { (_, status) -> status.canDownload }?.let { (candidate, status) ->
+            downloadServices[language] = candidate
+            return status
+        }
+        checks.firstOrNull { (_, status) ->
+            status.availability in setOf(
+                AndroidLanguagePackAvailability.DOWNLOADING,
+                AndroidLanguagePackAvailability.SCHEDULED,
+            )
+        }?.let { (candidate, status) ->
+            downloadServices[language] = candidate
+            return status
+        }
+        downloadServices.remove(language)
+        return checks.firstOrNull { (_, status) ->
+            status.availability == AndroidLanguagePackAvailability.ONLINE_ONLY
+        }?.second
+            ?: checks.firstOrNull { (_, status) ->
+                status.availability == AndroidLanguagePackAvailability.UNKNOWN
+            }?.second
+            ?: checks.firstOrNull { (_, status) ->
+                status.availability == AndroidLanguagePackAvailability.ERROR
+            }?.second
+            ?: AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNSUPPORTED,
+                detail = "No installed Samsung or Google recognizer supports ${language.bcp47}.",
+            )
     }
 
-    internal fun recognitionServiceKey(): String {
-        val configuredService = runCatching {
-            Settings.Secure.getString(context.contentResolver, VOICE_RECOGNITION_SERVICE_SETTING)
-        }.getOrNull()?.takeIf(String::isNotBlank)
-        val voiceDetailsService = runCatching {
-            RecognizerIntent.getVoiceDetailsIntent(context)
-                ?.component
-                ?.flattenToShortString()
-        }.getOrNull()?.takeIf(String::isNotBlank)
-        return configuredService ?: voiceDetailsService ?: DEFAULT_RECOGNITION_SERVICE_KEY
+    internal suspend fun downloadOfflineLanguage(
+        language: AppLanguage,
+        onProgress: (AndroidLanguagePackStatus) -> Unit,
+    ): AndroidLanguagePackStatus {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNKNOWN,
+                providerName = "Android",
+                detail = "Open Android voice input settings to install this language.",
+            )
+        }
+        val current = inspectOfflineLanguage(language)
+        if (current.isInstalled) return current
+        if (
+            current.availability == AndroidLanguagePackAvailability.SCHEDULED ||
+            current.availability == AndroidLanguagePackAvailability.DOWNLOADING
+        ) {
+            return current
+        }
+        val candidate = downloadServices[language] ?: return current
+        val requested = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            triggerModelDownloadWithProgress(candidate, language, onProgress)
+        } else {
+            triggerModelDownload(candidate, language)
+        }
+        if (requested.isInstalled) {
+            installedServices[language] = candidate
+            downloadServices.remove(language)
+        }
+        return requested
     }
+
+    internal fun activeServiceName(): String = activeRecognitionServiceName
 
     override suspend fun stop(): String {
         withContext(Dispatchers.Main.immediate) {
@@ -126,11 +224,23 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         removeScheduledCallbacks()
         recognizer?.destroy()
         recognizer = null
+        recognizerComponent = null
+        activeRecognitionServiceName = "Android"
         sessionActive = false
     }
 
-    private fun ensureRecognizer(): SpeechRecognizer =
-        recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
+    private fun configureRecognizer(candidate: RecognitionServiceCandidate?) {
+        if (recognizer != null && recognizerComponent == candidate?.component) return
+        recognizer?.destroy()
+        recognizer = null
+        recognizerComponent = candidate?.component
+        activeRecognitionServiceName = candidate?.providerName ?: "Android"
+    }
+
+    private fun ensureRecognizer(): SpeechRecognizer = recognizer
+        ?: (recognizerComponent?.let { component ->
+            SpeechRecognizer.createSpeechRecognizer(context, component)
+        } ?: SpeechRecognizer.createSpeechRecognizer(context)).also {
             recognizer = it
             it.setRecognitionListener(listener)
         }
@@ -182,44 +292,228 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         mainHandler.removeCallbacks(stopFallbackRunnable)
     }
 
+    private suspend fun preferredInstalledService(
+        language: AppLanguage,
+    ): RecognitionServiceCandidate? = installedServices[language] ?: run {
+        inspectOfflineLanguage(language)
+        installedServices[language]
+    }
+
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private suspend fun checkRecognitionSupport(
+        candidate: RecognitionServiceCandidate,
         language: AppLanguage,
-    ): AndroidSttAvailability =
-        withContext(Dispatchers.Main.immediate) {
-            suspendCancellableCoroutine { continuation ->
-                val speechRecognizer = ensureRecognizer()
-                runCatching {
-                    speechRecognizer.checkRecognitionSupport(
-                        speechRecognitionIntent(language),
-                        ContextCompat.getMainExecutor(context),
-                        object : RecognitionSupportCallback {
-                            override fun onSupportResult(recognitionSupport: RecognitionSupport) {
-                                if (continuation.isActive) {
-                                    continuation.resume(
-                                        recognitionSupportAvailability(
-                                            recognitionSupport = recognitionSupport,
-                                            requestedLanguageTag = language.bcp47,
+    ): AndroidLanguagePackStatus = withContext(Dispatchers.Main.immediate) {
+        val speechRecognizer = runCatching {
+            SpeechRecognizer.createSpeechRecognizer(context, candidate.component)
+        }.getOrElse { throwable ->
+            return@withContext AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.ERROR,
+                providerName = candidate.providerName,
+                detail = throwable.message ?: "Could not start the recognition service.",
+            )
+        }
+        try {
+            withTimeoutOrNull(SUPPORT_CHECK_TIMEOUT_MS) {
+                suspendCancellableCoroutine { continuation ->
+                    runCatching {
+                        speechRecognizer.checkRecognitionSupport(
+                            speechRecognitionIntent(language),
+                            ContextCompat.getMainExecutor(context),
+                            object : RecognitionSupportCallback {
+                                override fun onSupportResult(
+                                    recognitionSupport: RecognitionSupport,
+                                ) {
+                                    if (continuation.isActive) {
+                                        continuation.resume(
+                                            recognitionSupportPackStatus(
+                                                recognitionSupport = recognitionSupport,
+                                                requestedLanguageTag = language.bcp47,
+                                                providerName = candidate.providerName,
+                                            ),
+                                        )
+                                    }
+                                }
+
+                                override fun onError(error: Int) {
+                                    if (continuation.isActive) {
+                                        continuation.resume(
+                                            recognitionSupportErrorPackStatus(
+                                                error = error,
+                                                providerName = candidate.providerName,
+                                            ),
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }.onFailure { throwable ->
+                        if (continuation.isActive) {
+                            continuation.resume(
+                                AndroidLanguagePackStatus(
+                                    availability = AndroidLanguagePackAvailability.ERROR,
+                                    providerName = candidate.providerName,
+                                    detail = throwable.message ?: "Speech support check failed.",
+                                ),
+                            )
+                        }
+                    }
+                }
+            } ?: AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.UNKNOWN,
+                providerName = candidate.providerName,
+                detail = "The speech service did not answer the support check.",
+            )
+        } finally {
+            speechRecognizer.destroy()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private suspend fun triggerModelDownload(
+        candidate: RecognitionServiceCandidate,
+        language: AppLanguage,
+    ): AndroidLanguagePackStatus = withContext(Dispatchers.Main.immediate) {
+        val speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context, candidate.component)
+        try {
+            speechRecognizer.triggerModelDownload(speechRecognitionIntent(language))
+            AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.SCHEDULED,
+                providerName = candidate.providerName,
+                detail = "The speech pack download was requested.",
+            )
+        } catch (throwable: Throwable) {
+            AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.ERROR,
+                providerName = candidate.providerName,
+                detail = throwable.message ?: "Could not request the speech pack download.",
+            )
+        } finally {
+            speechRecognizer.destroy()
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private suspend fun triggerModelDownloadWithProgress(
+        candidate: RecognitionServiceCandidate,
+        language: AppLanguage,
+        onProgress: (AndroidLanguagePackStatus) -> Unit,
+    ): AndroidLanguagePackStatus = withContext(Dispatchers.Main.immediate) {
+        val speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context, candidate.component)
+        try {
+            withTimeoutOrNull(MODEL_DOWNLOAD_REQUEST_TIMEOUT_MS) {
+                suspendCancellableCoroutine { continuation ->
+                    continuation.invokeOnCancellation {
+                        mainHandler.post { speechRecognizer.destroy() }
+                    }
+                    runCatching {
+                        speechRecognizer.triggerModelDownload(
+                            speechRecognitionIntent(language),
+                            ContextCompat.getMainExecutor(context),
+                            object : ModelDownloadListener {
+                                override fun onProgress(completedPercent: Int) {
+                                    onProgress(
+                                        AndroidLanguagePackStatus(
+                                            availability =
+                                                AndroidLanguagePackAvailability.DOWNLOADING,
+                                            providerName = candidate.providerName,
+                                            progressPercent = completedPercent.coerceIn(0, 100),
                                         ),
                                     )
                                 }
-                            }
 
-                            override fun onError(error: Int) {
-                                if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) destroy()
-                                if (continuation.isActive) {
-                                    continuation.resume(recognitionSupportErrorAvailability(error))
+                                override fun onScheduled() {
+                                    if (continuation.isActive) {
+                                        continuation.resume(
+                                            AndroidLanguagePackStatus(
+                                                availability =
+                                                    AndroidLanguagePackAvailability.SCHEDULED,
+                                                providerName = candidate.providerName,
+                                                detail =
+                                                    "The speech pack download was scheduled.",
+                                            ),
+                                        )
+                                    }
                                 }
-                            }
-                        },
-                    )
-                }.onFailure {
-                    if (continuation.isActive) {
-                        continuation.resume(AndroidSttAvailability.UNKNOWN)
+
+                                override fun onSuccess() {
+                                    if (continuation.isActive) {
+                                        continuation.resume(
+                                            AndroidLanguagePackStatus(
+                                                availability =
+                                                    AndroidLanguagePackAvailability.INSTALLED,
+                                                providerName = candidate.providerName,
+                                            ),
+                                        )
+                                    }
+                                }
+
+                                override fun onError(error: Int) {
+                                    if (continuation.isActive) {
+                                        continuation.resume(
+                                            AndroidLanguagePackStatus(
+                                                availability =
+                                                    AndroidLanguagePackAvailability.ERROR,
+                                                providerName = candidate.providerName,
+                                                detail =
+                                                    "Speech pack download failed (error $error).",
+                                            ),
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }.onFailure { throwable ->
+                        if (continuation.isActive) {
+                            continuation.resume(
+                                AndroidLanguagePackStatus(
+                                    availability = AndroidLanguagePackAvailability.ERROR,
+                                    providerName = candidate.providerName,
+                                    detail = throwable.message
+                                        ?: "Could not request the speech pack download.",
+                                ),
+                            )
+                        }
                     }
                 }
-            }
+            } ?: AndroidLanguagePackStatus(
+                availability = AndroidLanguagePackAvailability.ERROR,
+                providerName = candidate.providerName,
+                detail = "The speech service did not answer the download request.",
+            )
+        } finally {
+            speechRecognizer.destroy()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun recognitionServices(): List<RecognitionServiceCandidate> = context.packageManager
+        .queryIntentServices(
+            Intent(RecognitionService.SERVICE_INTERFACE),
+            PackageManager.MATCH_ALL,
+        )
+        .asSequence()
+        .mapNotNull { resolveInfo ->
+            val serviceInfo = resolveInfo.serviceInfo ?: return@mapNotNull null
+            if (!serviceInfo.enabled || !serviceInfo.exported) return@mapNotNull null
+            val packageName = serviceInfo.packageName
+            if (!isSamsungOrGoogleSpeechProvider(packageName)) return@mapNotNull null
+            RecognitionServiceCandidate(
+                component = ComponentName(packageName, serviceInfo.name),
+                packageName = packageName,
+                providerName = androidSpeechProviderName(
+                    packageName,
+                    resolveInfo.loadLabel(context.packageManager)?.toString().orEmpty(),
+                ),
+            )
+        }
+        .distinctBy { it.component }
+        .sortedWith(
+            compareBy<RecognitionServiceCandidate> {
+                androidSpeechProviderPriority(it.packageName)
+            }.thenBy { it.providerName },
+        )
+        .toList()
 
     private val listener = object : RecognitionListener {
         override fun onResults(results: Bundle?) {
@@ -280,11 +574,10 @@ class SystemSttProvider(private val context: Context) : SttProvider {
 
     private companion object {
         const val SUPPORT_CHECK_TIMEOUT_MS = 2_500L
+        const val MODEL_DOWNLOAD_REQUEST_TIMEOUT_MS = 30_000L
         const val SESSION_RESTART_DELAY_MS = 180L
         const val BUSY_RESTART_DELAY_MS = 500L
         const val STOP_FALLBACK_MS = 2_500L
-        const val VOICE_RECOGNITION_SERVICE_SETTING = "voice_recognition_service"
-        const val DEFAULT_RECOGNITION_SERVICE_KEY = "system-default"
         val RESTARTABLE_SESSION_ERRORS = setOf(
             SpeechRecognizer.ERROR_NO_MATCH,
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
@@ -293,6 +586,12 @@ class SystemSttProvider(private val context: Context) : SttProvider {
     }
 
 }
+
+private data class RecognitionServiceCandidate(
+    val component: ComponentName,
+    val packageName: String,
+    val providerName: String,
+)
 
 internal fun mergeRecognitionTranscripts(committed: String, incoming: String): String {
     val stable = committed.trim()
@@ -330,45 +629,90 @@ internal class SystemSttException(
     message: String,
 ) : IllegalStateException(message)
 
-internal fun isMissingAndroidSpeechLanguage(throwable: Throwable): Boolean =
-    (throwable as? SystemSttException)?.errorCode in setOf(
-        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
-        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
-    )
+internal fun languageTagMatches(candidate: String, requested: String): Boolean {
+    val candidateLocale = Locale.forLanguageTag(candidate.replace('_', '-'))
+    val requestedLocale = Locale.forLanguageTag(requested.replace('_', '-'))
+    if (candidateLocale.language.isBlank() || requestedLocale.language.isBlank()) return false
+    return candidateLocale.language.equals(requestedLocale.language, ignoreCase = true)
+}
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
-private fun recognitionSupportAvailability(
+private fun recognitionSupportPackStatus(
     recognitionSupport: RecognitionSupport,
     requestedLanguageTag: String,
-): AndroidSttAvailability {
+    providerName: String,
+): AndroidLanguagePackStatus {
     if (
         recognitionSupport.installedOnDeviceLanguages.any {
             languageTagMatches(it, requestedLanguageTag)
         }
     ) {
-        return AndroidSttAvailability.AVAILABLE
+        return AndroidLanguagePackStatus(
+            availability = AndroidLanguagePackAvailability.INSTALLED,
+            providerName = providerName,
+        )
     }
-    val explicitlyUnavailable = sequenceOf(
-        recognitionSupport.pendingOnDeviceLanguages,
-        recognitionSupport.supportedOnDeviceLanguages,
-        recognitionSupport.onlineLanguages,
-    ).flatten().any { languageTagMatches(it, requestedLanguageTag) }
-    return if (explicitlyUnavailable) {
-        AndroidSttAvailability.UNAVAILABLE
-    } else {
-        AndroidSttAvailability.UNKNOWN
+    if (
+        recognitionSupport.pendingOnDeviceLanguages.any {
+            languageTagMatches(it, requestedLanguageTag)
+        }
+    ) {
+        return AndroidLanguagePackStatus(
+            availability = AndroidLanguagePackAvailability.SCHEDULED,
+            providerName = providerName,
+            detail = "The offline speech pack is scheduled for download.",
+        )
     }
+    if (
+        recognitionSupport.supportedOnDeviceLanguages.any {
+            languageTagMatches(it, requestedLanguageTag)
+        }
+    ) {
+        return AndroidLanguagePackStatus(
+            availability = AndroidLanguagePackAvailability.DOWNLOADABLE,
+            providerName = providerName,
+        )
+    }
+    if (
+        recognitionSupport.onlineLanguages.any {
+            languageTagMatches(it, requestedLanguageTag)
+        }
+    ) {
+        return AndroidLanguagePackStatus(
+            availability = AndroidLanguagePackAvailability.ONLINE_ONLY,
+            providerName = providerName,
+            detail = "Only online recognition is available from $providerName.",
+        )
+    }
+    return AndroidLanguagePackStatus(
+        availability = AndroidLanguagePackAvailability.UNSUPPORTED,
+        providerName = providerName,
+    )
 }
 
-private fun recognitionSupportErrorAvailability(error: Int): AndroidSttAvailability =
-    if (
-        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
-        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
-    ) {
-        AndroidSttAvailability.UNAVAILABLE
-    } else {
-        AndroidSttAvailability.UNKNOWN
-    }
+private fun recognitionSupportErrorPackStatus(
+    error: Int,
+    providerName: String,
+): AndroidLanguagePackStatus = when (error) {
+    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> AndroidLanguagePackStatus(
+        availability = AndroidLanguagePackAvailability.UNSUPPORTED,
+        providerName = providerName,
+    )
+    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> AndroidLanguagePackStatus(
+        availability = AndroidLanguagePackAvailability.DOWNLOADABLE,
+        providerName = providerName,
+    )
+    SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT -> AndroidLanguagePackStatus(
+        availability = AndroidLanguagePackAvailability.UNKNOWN,
+        providerName = providerName,
+        detail = "$providerName cannot report installed offline languages.",
+    )
+    else -> AndroidLanguagePackStatus(
+        availability = AndroidLanguagePackAvailability.ERROR,
+        providerName = providerName,
+        detail = "Speech support check failed (error $error).",
+    )
+}
 
 internal fun speechRecognitionIntent(language: AppLanguage): Intent =
     Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {

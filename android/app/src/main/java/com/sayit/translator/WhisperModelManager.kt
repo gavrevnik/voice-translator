@@ -15,6 +15,8 @@ import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
+private const val WHISPER_MODEL_MANIFEST_ID = "whisper-large-v3-turbo-q4_0"
+
 data class WhisperModelManifest(
     val id: String,
     val version: String,
@@ -33,13 +35,32 @@ data class WhisperModelManifest(
     companion object {
         fun load(context: Context): WhisperModelManifest {
             val raw = context.assets.open("whisper_models.json").bufferedReader().use { it.readText() }
-            val json = JSONObject(raw)
+            val catalog = JSONObject(raw)
+            check(catalog.getString("defaultModelId") == WHISPER_MODEL_MANIFEST_ID) {
+                "Unexpected default Whisper model."
+            }
+            val models = catalog.getJSONArray("models")
+            check(models.length() == 1) { "Whisper catalog must contain only the Large model." }
+            return parse(models.getJSONObject(0)).also { manifest ->
+                check(manifest.id == WHISPER_MODEL_MANIFEST_ID) {
+                    "Whisper manifest is missing $WHISPER_MODEL_MANIFEST_ID."
+                }
+            }
+        }
+
+        private fun parse(json: JSONObject): WhisperModelManifest {
+            val id = json.getString("id")
+            val overrideUrl = if (id == WHISPER_MODEL_MANIFEST_ID) {
+                BuildConfig.OFFLINE_WHISPER_MODEL_URL
+            } else {
+                ""
+            }
             return WhisperModelManifest(
-                id = json.getString("id"),
+                id = id,
                 version = json.getString("version"),
                 displayName = json.getString("displayName"),
                 filename = json.getString("filename"),
-                downloadUrl = BuildConfig.OFFLINE_WHISPER_MODEL_URL.trim()
+                downloadUrl = overrideUrl.trim()
                     .ifBlank { json.getString("downloadUrl") },
                 sha256 = json.getString("sha256"),
                 downloadSize = json.getLong("downloadSize"),
@@ -64,15 +85,13 @@ class WhisperModelManager(
 ) {
     private val appContext = context.applicationContext
     val manifest: WhisperModelManifest = WhisperModelManifest.load(appContext)
-    private val modelRoot = File(appContext.filesDir, "offline-models/${manifest.id}").also {
+
+    init {
         LEGACY_MODEL_DIRECTORIES.forEach { relativePath ->
-            File(appContext.filesDir, relativePath)
-                .takeIf { legacyRoot -> legacyRoot != it }
-                ?.deleteRecursively()
+            File(appContext.filesDir, relativePath).deleteRecursively()
         }
     }
-    private val installDirectory = File(modelRoot, manifest.version)
-    private val modelFile = File(installDirectory, manifest.filename)
+
     private val vadDirectory = File(appContext.filesDir, "offline-models/$VAD_MODEL_ID")
     private val vadModelFile = File(vadDirectory, VAD_MODEL_FILENAME)
     @Volatile private var vadModelReady = false
@@ -80,6 +99,8 @@ class WhisperModelManager(
     val status: StateFlow<OfflineModelStatus> = _status.asStateFlow()
 
     suspend fun downloadAndInstall() = withContext(Dispatchers.IO) {
+        val modelRoot = modelRoot(manifest)
+        val installDirectory = installDirectory(manifest)
         val download = File(modelRoot, "${manifest.version}.download")
         val staging = File(modelRoot, "${manifest.version}.staging")
         try {
@@ -143,11 +164,13 @@ class WhisperModelManager(
     }
 
     suspend fun deleteModel() = withContext(Dispatchers.IO) {
-        modelRoot.deleteRecursively()
+        modelRoot(manifest).deleteRecursively()
         _status.value = OfflineModelStatus.NotInstalled
     }
 
     fun installedModel(): File {
+        val installDirectory = installDirectory(manifest)
+        val modelFile = modelFile(manifest)
         val validationError = validateInstallation()
         if (validationError != null) {
             _status.value = if (installDirectory.exists()) {
@@ -188,6 +211,7 @@ class WhisperModelManager(
     }
 
     private fun inspectInstallation(): OfflineModelStatus {
+        val installDirectory = installDirectory(manifest)
         if (!installDirectory.exists()) return OfflineModelStatus.NotInstalled
         val error = validateInstallation()
         return if (error == null) {
@@ -198,6 +222,7 @@ class WhisperModelManager(
     }
 
     private fun validateInstallation(): String? {
+        val modelFile = modelFile(manifest)
         if (!modelFile.isFile) return "Whisper model is not installed."
         if (modelFile.length() != manifest.installedSize) {
             return "Whisper model has an invalid size."
@@ -207,6 +232,15 @@ class WhisperModelManager(
         }
         return null
     }
+
+    private fun modelRoot(manifest: WhisperModelManifest): File =
+        File(appContext.filesDir, "offline-models/${manifest.id}")
+
+    private fun installDirectory(manifest: WhisperModelManifest): File =
+        File(modelRoot(manifest), manifest.version)
+
+    private fun modelFile(manifest: WhisperModelManifest): File =
+        File(installDirectory(manifest), manifest.filename)
 
     private companion object {
         val LEGACY_MODEL_DIRECTORIES = listOf(

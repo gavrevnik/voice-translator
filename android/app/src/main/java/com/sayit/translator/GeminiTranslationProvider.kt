@@ -25,7 +25,6 @@ class GeminiTranslationProvider(
         sourceLanguage: AppLanguage,
         targetLanguage: AppLanguage,
         transcript: String,
-        model: TranslationModel,
         geminiModel: GeminiTranslationModel,
         serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {

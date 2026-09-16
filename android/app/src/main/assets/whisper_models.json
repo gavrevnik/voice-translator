@@ -1,12 +1,17 @@
 {
-  "id": "whisper-large-v3-turbo-q4_0",
-  "version": "1",
-  "displayName": "Whisper Large V3 Turbo Multilingual Q4_0",
-  "filename": "ggml-large-v3-turbo-q4_0.bin",
-  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-whisper-large-v3-turbo-q4_0-v1/ggml-large-v3-turbo-q4_0.bin",
-  "sha256": "2ceb779ca61ce46ed6e9aa43c4a0f8a89a37f683df3c0ba3119238fcd5852155",
-  "downloadSize": 473992235,
-  "installedSize": 473992235,
-  "runtimeType": "whisper.cpp",
-  "runtimeVersion": "da54572229bcf64ba367d96c7ef15770376c4280"
+  "defaultModelId": "whisper-large-v3-turbo-q4_0",
+  "models": [
+    {
+      "id": "whisper-large-v3-turbo-q4_0",
+      "version": "1",
+      "displayName": "Whisper Large V3 Turbo Multilingual Q4_0",
+      "filename": "ggml-large-v3-turbo-q4_0.bin",
+      "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-whisper-large-v3-turbo-q4_0-v1/ggml-large-v3-turbo-q4_0.bin",
+      "sha256": "2ceb779ca61ce46ed6e9aa43c4a0f8a89a37f683df3c0ba3119238fcd5852155",
+      "downloadSize": 473992235,
+      "installedSize": 473992235,
+      "runtimeType": "whisper.cpp",
+      "runtimeVersion": "da54572229bcf64ba367d96c7ef15770376c4280"
+    }
+  ]
 }

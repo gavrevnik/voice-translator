@@ -11,7 +11,15 @@ val SayItBlue = Color(0xFF2E6BDC)
 val SayItBlueSoft = Color(0xFFEDF3FF)
 val SayItRed = Color(0xFFEF6253)
 val SayItRedSoft = Color(0xFFFFF0ED)
+val SayItControlLight = Color(0xFFF8F5EE)
+val SayItControlLightPressed = Color(0xFFEEE9DF)
+val SayItControlDark = Color(0xFF173F3A)
+val SayItControlDarkPressed = Color(0xFF0F312E)
+val SayItControlBorder = Color(0xFFDDD7CD)
+val SayItControlDisabled = Color(0xFFEFECE6)
+val SayItControlDisabledIcon = Color(0xFFA6AAA6)
 val SayItMuted = Color(0xFF74817C)
+val SayItReady = Color(0xFF2E8B57)
 
 private val colors = lightColorScheme(
     primary = SayItBlue,

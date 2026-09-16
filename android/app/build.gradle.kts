@@ -24,11 +24,8 @@ val geminiApiKey = providers.environmentVariable("GEMINI_API_KEY").orNull
     ?: readLocalEnv("GEMINI_API_KEY")
 val offlineOpusModelUrl = providers.environmentVariable("OFFLINE_OPUS_MODEL_URL").orNull
     ?: readLocalEnv("OFFLINE_OPUS_MODEL_URL")
-val offlineOpusIneModelUrl = providers.environmentVariable("OFFLINE_OPUS_INE_MODEL_URL").orNull
-    ?: readLocalEnv("OFFLINE_OPUS_INE_MODEL_URL")
 val offlineWhisperModelUrl = providers.environmentVariable("OFFLINE_WHISPER_MODEL_URL").orNull
     ?: readLocalEnv("OFFLINE_WHISPER_MODEL_URL")
-
 fun String.asBuildConfigString(): String = "\"" +
     replace("\\", "\\\\").replace("\"", "\\\"") +
     "\""
@@ -41,8 +38,8 @@ android {
         applicationId = "com.sayit.translator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.14.0"
+        versionCode = 23
+        versionName = "0.16.7"
 
         buildConfigField("String", "GROQ_API_KEY", groqApiKey.asBuildConfigString())
         buildConfigField("String", "GEMINI_API_KEY", geminiApiKey.asBuildConfigString())
@@ -53,15 +50,9 @@ android {
         )
         buildConfigField(
             "String",
-            "OFFLINE_OPUS_INE_MODEL_URL",
-            offlineOpusIneModelUrl.asBuildConfigString(),
-        )
-        buildConfigField(
-            "String",
             "OFFLINE_WHISPER_MODEL_URL",
             offlineWhisperModelUrl.asBuildConfigString(),
         )
-
     }
 
     buildTypes {

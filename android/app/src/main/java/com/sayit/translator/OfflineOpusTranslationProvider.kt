@@ -22,7 +22,6 @@ class OfflineOpusTranslationProvider(
         sourceLanguage: AppLanguage,
         targetLanguage: AppLanguage,
         transcript: String,
-        model: TranslationModel,
         geminiModel: GeminiTranslationModel,
         serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {
@@ -75,7 +74,6 @@ class OfflineOpusTranslationProvider(
 
 enum class OfflineOpusFamily(val groupCode: String) {
     SLAVIC("sla"),
-    INDO_EUROPEAN("ine"),
 }
 
 internal fun offlineOpusInput(
@@ -90,14 +88,6 @@ internal fun offlineOpusInput(
             AppLanguage.SERBIAN -> serbianScript.targetToken
             AppLanguage.CROATIAN -> ">>hrv<<"
             else -> error("Unsupported Slavic target language: ${targetLanguage.canonicalName}")
-        }
-        OfflineOpusFamily.INDO_EUROPEAN -> when (targetLanguage) {
-            AppLanguage.RUSSIAN -> ">>rus<<"
-            AppLanguage.SPANISH -> ">>spa<<"
-            AppLanguage.ROMANIAN -> ">>ron<<"
-            else -> error(
-                "Unsupported Indo-European target language: ${targetLanguage.canonicalName}",
-            )
         }
     }
     return "$targetToken ${transcript.trim()}"
