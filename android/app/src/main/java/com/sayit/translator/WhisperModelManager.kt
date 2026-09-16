@@ -64,7 +64,11 @@ class WhisperModelManager(
 ) {
     private val appContext = context.applicationContext
     val manifest: WhisperModelManifest = WhisperModelManifest.load(appContext)
-    private val modelRoot = File(appContext.filesDir, "offline-models/${manifest.id}")
+    private val modelRoot = File(appContext.filesDir, "offline-models/${manifest.id}").also {
+        File(appContext.filesDir, LEGACY_BASE_MODEL_DIRECTORY)
+            .takeIf { legacyRoot -> legacyRoot != it }
+            ?.deleteRecursively()
+    }
     private val installDirectory = File(modelRoot, manifest.version)
     private val modelFile = File(installDirectory, manifest.filename)
     private val _status = MutableStateFlow(inspectInstallation())
@@ -170,5 +174,9 @@ class WhisperModelManager(
             return "Whisper model checksum mismatch."
         }
         return null
+    }
+
+    private companion object {
+        const val LEGACY_BASE_MODEL_DIRECTORY = "offline-models/whisper-base-q5_1"
     }
 }

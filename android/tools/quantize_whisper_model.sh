@@ -5,8 +5,8 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 android_dir="$(cd "$script_dir/.." && pwd)"
 repo_dir="$(cd "$android_dir/.." && pwd)"
 whisper_dir="${WHISPER_CPP_DIR:-$repo_dir/references/whisper.cpp}"
-source_model="${1:-$android_dir/optional/whisper/models/ggml-base.bin}"
-output_model="${2:-$android_dir/model-packs/ggml-base-q5_1.bin}"
+source_model="${1:-$android_dir/optional/whisper/models/ggml-small.bin}"
+output_model="${2:-$android_dir/model-packs/ggml-small-q5_1.bin}"
 build_dir="${TMPDIR:-/tmp}/sayit-whisper-quantize"
 
 if [[ ! -f "$whisper_dir/CMakeLists.txt" ]]; then
@@ -16,7 +16,7 @@ if [[ ! -f "$whisper_dir/CMakeLists.txt" ]]; then
 fi
 
 if [[ ! -f "$source_model" ]]; then
-  echo "Source Whisper Base model is missing: $source_model" >&2
+  echo "Source Whisper Small model is missing: $source_model" >&2
   exit 1
 fi
 

@@ -1,13 +1,14 @@
 {
-  "id": "opus-mt-sla-sla-int8",
+  "id": "opus-mt-sla-sla-fp32",
   "version": "1",
   "source": "Helsinki-NLP/opus-mt-sla-sla (opus-2020-07-27)",
   "sourceUrl": "https://object.pouta.csc.fi/Tatoeba-MT-models/sla-sla/opus-2020-07-27.zip",
   "sourceSha256": "b6cf76509de6ee34789ec2d169f4c5f85bd25170deb2ab75f2896c0f1b347a17",
   "license": "Apache-2.0",
-  "quantization": "INT8 / Marian intgemm8",
+  "precision": "FP32",
   "runtimeType": "Bergamot/Marian via translate-kit",
   "runtimeVersion": "translate-kit-android 0.1.0",
+  "modelFile": "model.float32.bin",
   "supportedDirections": [
     "ru-sr",
     "sr-ru",
@@ -19,12 +20,11 @@
     "srp_Cyrl",
     "hrv"
   ],
-  "defaultSerbianScript": "srp_Latn",
   "files": [
     {
-      "name": "model.intgemm8.bin",
-      "size": 64176671,
-      "sha256": "980315313b9509f5378c485c1e8693cf57f7fa05458714032434f2d4dd5f9e52"
+      "name": "model.float32.bin",
+      "size": 254918431,
+      "sha256": "0367882d1c3c8556c9e70fb106bba05674e9f33fb142b7e82dd362cb50e93c0b"
     },
     {
       "name": "source.spm",
@@ -43,17 +43,18 @@
     },
     {
       "name": "config.yml",
-      "size": 254,
-      "sha256": "00dde3faefd474e437fbb3bbb3ac0f12c8b96a7083711c712e02bfa3a333722f"
+      "size": 257,
+      "sha256": "3fa1b077d9dedbbb1bb386f6d02071ff880bac2120cda6c22f4f5ee1875ae584"
     }
   ],
-  "displayName": "OPUS Slavic — Offline",
-  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-opus-sla-v1/offline-opus-sla-int8-v1.zip",
-  "sha256": "0eefe9d196880a89f2d91c6b7c584e0353407954f95b7902de38fa9a5ab74976",
-  "downloadSize": 45045954,
-  "installedSize": 66813730,
+  "defaultSerbianScript": "srp_Latn",
+  "displayName": "OPUS Slavic FP32 — Offline",
+  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-opus-sla-fp32-v1/offline-opus-sla-fp32-v1.zip",
+  "sha256": "eaac8da16c466928fdfc23bd23dc9a296f1f373d2433c19bc7b8006a8b254298",
+  "downloadSize": 237545582,
+  "installedSize": 257555545,
   "requiredFiles": [
-    "model.intgemm8.bin",
+    "model.float32.bin",
     "source.spm",
     "target.spm",
     "lex.s2t.bin",

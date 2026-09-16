@@ -120,6 +120,8 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             onSerbianScript = viewModel::setSerbianScript,
             onDownloadOfflineModel = viewModel::downloadOfflineModel,
             onDeleteOfflineModel = viewModel::deleteOfflineModel,
+            onDownloadOfflineIneModel = viewModel::downloadOfflineIneModel,
+            onDeleteOfflineIneModel = viewModel::deleteOfflineIneModel,
             onDownloadWhisperModel = viewModel::downloadWhisperModel,
             onDeleteWhisperModel = viewModel::deleteWhisperModel,
             onSttEngine = viewModel::setSttEngine,
@@ -140,8 +142,8 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
     val targetColor = if (targetSide == LanguageSide.A) SayItBlue else SayItRed
     val sourceBackground = if (sourceSide == LanguageSide.A) SayItBlueSoft else SayItRedSoft
     val targetBackground = if (targetSide == LanguageSide.A) SayItBlueSoft else SayItRedSoft
-    val sourceLabel = "Source · ${sourceLanguage.nativeName}"
-    val targetLabel = "Translation · ${targetLanguage.nativeName}"
+    val sourceLabel = sourceLanguage.nativeName
+    val targetLabel = targetLanguage.nativeName
 
     Column(
         modifier = Modifier
@@ -216,7 +218,10 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             status = state.status,
             hasResult = state.resultSide != null,
             elapsedSeconds = state.elapsedSeconds,
-            recognitionLabel = state.sttEngine.progressLabel,
+            recognitionLabel = recognitionProgressLabel(
+                selected = state.sttEngine,
+                active = state.activeSttEngine,
+            ),
             translationLabel = TranslationOption.from(state).progressLabel,
             playbackLabel = PLAYBACK_PROGRESS_LABEL,
             onStopPlayback = viewModel::stopPlayback,
@@ -227,6 +232,7 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             text = sourceText,
             color = sourceColor,
             background = sourceBackground,
+            isPartial = state.partialTranscriptSide == sourceSide,
             canReplay = false,
             canCopy = false,
             onReplay = viewModel::replay,
@@ -246,6 +252,7 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             text = targetText,
             color = targetColor,
             background = targetBackground,
+            isPartial = false,
             canReplay = state.resultSide == targetSide && state.status == VoiceStatus.READY,
             canCopy = true,
             onReplay = viewModel::replay,
@@ -292,6 +299,7 @@ private fun TurnProgress(
         VoiceStatus.ERROR -> -1
     }
     val labels = listOf(recognitionLabel, translationLabel, playbackLabel)
+    val labelWeights = listOf(1.65f, 1.05f, 0.75f)
 
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -309,7 +317,7 @@ private fun TurnProgress(
             ) {
                 labels.forEachIndexed { index, label ->
                     Row(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(labelWeights[index]),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center,
                     ) {
@@ -325,7 +333,7 @@ private fun TurnProgress(
                             } else {
                                 SayItMuted
                             },
-                            fontSize = 8.sp,
+                            fontSize = if (index == 0 && label.length > 14) 7.sp else 8.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -527,6 +535,7 @@ private fun PhraseCard(
     text: String,
     color: Color,
     background: Color,
+    isPartial: Boolean,
     canReplay: Boolean,
     canCopy: Boolean,
     onReplay: () -> Unit,
@@ -542,14 +551,13 @@ private fun PhraseCard(
         shape = RoundedCornerShape(24.dp),
         color = background.copy(alpha = 0.76f),
         border = BorderStroke(1.dp, color.copy(alpha = 0.24f)),
-        shadowElevation = 5.dp,
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 22.dp, vertical = 19.dp),
             verticalArrangement = Arrangement.spacedBy(11.dp),
         ) {
             Text(
-                text = label,
+                text = if (isPartial) "$label · partial" else label,
                 color = color,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -565,6 +573,7 @@ private fun PhraseCard(
             } else {
                 Text(
                     text = text,
+                    color = if (isPartial) SayItInk.copy(alpha = 0.58f) else SayItInk,
                     fontFamily = FontFamily.Serif,
                     fontSize = 29.sp,
                     lineHeight = 35.sp,
@@ -710,6 +719,8 @@ private fun SettingsScreen(
     onSerbianScript: (SerbianScript) -> Unit,
     onDownloadOfflineModel: () -> Unit,
     onDeleteOfflineModel: () -> Unit,
+    onDownloadOfflineIneModel: () -> Unit,
+    onDeleteOfflineIneModel: () -> Unit,
     onDownloadWhisperModel: () -> Unit,
     onDeleteWhisperModel: () -> Unit,
     onSttEngine: (SttEngine) -> Unit,
@@ -759,7 +770,7 @@ private fun SettingsScreen(
                     items = SttEngine.entries,
                     itemLabel = { it.label },
                     itemEnabled = { engine ->
-                        engine != SttEngine.WHISPER_OFFLINE || state.whisperRuntimeAvailable
+                        !engine.isWhisperOffline() || state.whisperRuntimeAvailable
                     },
                     onSelected = onSttEngine,
                 )
@@ -770,10 +781,19 @@ private fun SettingsScreen(
                         fontSize = 13.sp,
                     )
                 }
-                if (state.sttEngine == SttEngine.WHISPER_OFFLINE) {
+                if (
+                    state.sttEngine == SttEngine.AUTO ||
+                    state.sttEngine.isWhisperOffline()
+                ) {
                     OfflineModelPanel(
-                        title = "Whisper Base Multilingual Q5_1",
-                        subtitle = "On-device recognition for every app language",
+                        title = "Whisper Small Multilingual Q5_1",
+                        subtitle = when (state.sttEngine) {
+                            SttEngine.AUTO ->
+                                "Offline Live fallback when Android STT and internet are unavailable"
+                            SttEngine.WHISPER_OFFLINE_LIVE ->
+                                "On-device recognition with live partial text"
+                            else -> "On-device recognition after Stop"
+                        },
                         status = state.whisperModelStatus,
                         downloadSizeLabel = state.whisperModelDownloadSizeLabel,
                         onDownload = onDownloadWhisperModel,
@@ -790,17 +810,22 @@ private fun SettingsScreen(
                     items = TranslationOption.entries,
                     itemLabel = { it.label },
                     itemEnabled = { option ->
-                        option != TranslationOption.OFFLINE_OPUS ||
-                            (
-                                isOfflineOpusDirection(state.languageA, state.languageB) &&
-                                    state.offlineRuntimeAvailable
-                                )
+                        !option.engine.isOfflineOpus() ||
+                            (isOfflineOpusDirection(
+                                option.engine,
+                                state.languageA,
+                                state.languageB,
+                            ) && state.offlineRuntimeAvailable)
                     },
                     onSelected = onTranslationOption,
                 )
-                if (!isOfflineOpusDirection(state.languageA, state.languageB)) {
+                if (
+                    !isOfflineSlavicDirection(state.languageA, state.languageB) &&
+                    !isOfflineIndoEuropeanDirection(state.languageA, state.languageB)
+                ) {
                     Text(
-                        text = "Offline OPUS is available for Russian ↔ Serbian or Croatian.",
+                        text = "Offline OPUS supports Russian ↔ Serbian/Croatian and " +
+                            "Russian ↔ Romanian/Spanish.",
                         color = SayItMuted,
                         fontSize = 13.sp,
                     )
@@ -812,31 +837,46 @@ private fun SettingsScreen(
                         fontSize = 13.sp,
                     )
                 }
-                if (state.translationEngine == TranslationEngine.OFFLINE_OPUS) {
-                    if (
-                        state.languageA == AppLanguage.SERBIAN ||
-                        state.languageB == AppLanguage.SERBIAN
-                    ) {
-                        Text(
-                            text = "Serbian output",
-                            color = SayItMuted,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        SettingPicker(
-                            value = state.serbianScript,
-                            items = SerbianScript.entries,
-                            itemLabel = { it.label },
-                            onSelected = onSerbianScript,
-                        )
-                    }
+                if (
+                    state.translationEngine == TranslationEngine.OFFLINE_OPUS_SLAVIC &&
+                    (state.languageA == AppLanguage.SERBIAN ||
+                        state.languageB == AppLanguage.SERBIAN)
+                ) {
+                    Text(
+                        text = "Serbian output",
+                        color = SayItMuted,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    SettingPicker(
+                        value = state.serbianScript,
+                        items = SerbianScript.entries,
+                        itemLabel = { it.label },
+                        onSelected = onSerbianScript,
+                    )
+                }
+                if (state.offlineRuntimeAvailable) {
+                    Text(
+                        text = "Offline model downloads",
+                        color = SayItMuted,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                     OfflineModelPanel(
-                        title = "Russian ↔ Serbian / Croatian",
-                        subtitle = "Offline translation",
+                        title = "OPUS Slavic FP32",
+                        subtitle = "Russian ↔ Serbian / Croatian",
                         status = state.offlineModelStatus,
                         downloadSizeLabel = state.offlineModelDownloadSizeLabel,
                         onDownload = onDownloadOfflineModel,
                         onDelete = onDeleteOfflineModel,
+                    )
+                    OfflineModelPanel(
+                        title = "OPUS Indo-European FP32",
+                        subtitle = "Russian ↔ Romanian / Spanish",
+                        status = state.offlineIneModelStatus,
+                        downloadSizeLabel = state.offlineIneModelDownloadSizeLabel,
+                        onDownload = onDownloadOfflineIneModel,
+                        onDelete = onDeleteOfflineIneModel,
                     )
                 }
             }

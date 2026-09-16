@@ -161,39 +161,59 @@ Java_com_whispercpp_whisper_WhisperLib_00024Companion_freeContext(
     whisper_free(context);
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jint JNICALL
 Java_com_whispercpp_whisper_WhisperLib_00024Companion_fullTranscribe(
         JNIEnv *env, jobject thiz, jlong context_ptr, jint num_threads, jfloatArray audio_data,
-        jstring language_str) {
+        jstring language_str, jstring initial_prompt_str, jboolean final_decode) {
     UNUSED(thiz);
     struct whisper_context *context = (struct whisper_context *) context_ptr;
     jfloat *audio_data_arr = (*env)->GetFloatArrayElements(env, audio_data, NULL);
     const jsize audio_data_length = (*env)->GetArrayLength(env, audio_data);
     const char *language = (*env)->GetStringUTFChars(env, language_str, NULL);
+    const char *initial_prompt = initial_prompt_str == NULL
+            ? NULL
+            : (*env)->GetStringUTFChars(env, initial_prompt_str, NULL);
 
     // The below adapted from the Objective-C iOS sample
-    struct whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    params.print_realtime = true;
+    const enum whisper_sampling_strategy strategy = final_decode
+            ? WHISPER_SAMPLING_BEAM_SEARCH
+            : WHISPER_SAMPLING_GREEDY;
+    struct whisper_full_params params = whisper_full_default_params(strategy);
+    params.print_realtime = false;
     params.print_progress = false;
-    params.print_timestamps = true;
+    params.print_timestamps = false;
     params.print_special = false;
     params.translate = false;
     params.language = language;
+    params.detect_language = false;
+    params.initial_prompt = initial_prompt;
+    params.carry_initial_prompt = false;
     params.n_threads = num_threads;
     params.offset_ms = 0;
     params.no_context = true;
-    params.single_segment = false;
+    params.no_timestamps = true;
+    params.single_segment = !final_decode;
+    if (final_decode) {
+        params.beam_search.beam_size = 5;
+    } else {
+        params.greedy.best_of = 1;
+    }
 
     whisper_reset_timings(context);
 
     LOGI("About to run whisper_full");
-    if (whisper_full(context, params, audio_data_arr, audio_data_length) != 0) {
+    const int result = whisper_full(context, params, audio_data_arr, audio_data_length);
+    if (result != 0) {
         LOGI("Failed to run the model");
     } else {
         whisper_print_timings(context);
     }
+    if (initial_prompt != NULL) {
+        (*env)->ReleaseStringUTFChars(env, initial_prompt_str, initial_prompt);
+    }
     (*env)->ReleaseStringUTFChars(env, language_str, language);
     (*env)->ReleaseFloatArrayElements(env, audio_data, audio_data_arr, JNI_ABORT);
+    return result;
 }
 
 JNIEXPORT jint JNICALL

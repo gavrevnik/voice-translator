@@ -20,12 +20,32 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private val settings = AppSettings(application)
     private val openAiTranslationProvider: TranslationProvider = OpenAiTranslationProvider()
     private val geminiTranslationProvider: TranslationProvider = GeminiTranslationProvider()
-    private val offlineModelManager = OfflineModelManager(application)
-    private val offlineTranslationProvider =
-        OfflineOpusTranslationProvider(application, offlineModelManager)
+    private val offlineModelManager = OfflineModelManager(
+        application,
+        assetName = "offline_models.json",
+        overrideDownloadUrl = BuildConfig.OFFLINE_OPUS_MODEL_URL,
+        retiredModelIds = setOf("opus-mt-sla-sla-int8"),
+    )
+    private val offlineIneModelManager = OfflineModelManager(
+        application,
+        assetName = "offline_models_ine.json",
+        overrideDownloadUrl = BuildConfig.OFFLINE_OPUS_INE_MODEL_URL,
+        retiredModelIds = setOf("opus-mt-itc-itc-int8"),
+    )
+    private val offlineTranslationProvider = OfflineOpusTranslationProvider(
+        application,
+        offlineModelManager,
+        OfflineOpusFamily.SLAVIC,
+    )
+    private val offlineIneTranslationProvider = OfflineOpusTranslationProvider(
+        application,
+        offlineIneModelManager,
+        OfflineOpusFamily.INDO_EUROPEAN,
+    )
     private val systemTtsProvider: TtsProvider = SystemTtsProvider(application)
     private val systemProvider = SystemSttProvider(application)
     private val groqProvider = GroqWhisperSttProvider()
+    private val autoSttRouter = AutoSttRouter(application, systemProvider)
     private val whisperModelManager = WhisperModelManager(application)
     private val whisperProvider = WhisperSttProvider(whisperModelManager)
     private var activeSttProvider: SttProvider? = null
@@ -41,6 +61,8 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
             serbianScript = settings.serbianScript,
             offlineModelStatus = offlineModelManager.status.value,
             offlineModelDownloadSizeLabel = offlineModelManager.manifest.downloadSizeLabel,
+            offlineIneModelStatus = offlineIneModelManager.status.value,
+            offlineIneModelDownloadSizeLabel = offlineIneModelManager.manifest.downloadSizeLabel,
             offlineRuntimeAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
                 Build.SUPPORTED_ABIS.any { it == "arm64-v8a" },
             whisperModelStatus = whisperModelManager.status.value,
@@ -55,6 +77,11 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             offlineModelManager.status.collect { modelStatus ->
                 _uiState.update { it.copy(offlineModelStatus = modelStatus) }
+            }
+        }
+        viewModelScope.launch {
+            offlineIneModelManager.status.collect { modelStatus ->
+                _uiState.update { it.copy(offlineIneModelStatus = modelStatus) }
             }
         }
         viewModelScope.launch {
@@ -92,8 +119,8 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         settings.languageA = nextA
         settings.languageB = nextB
         val offlineBecameUnavailable =
-            current.translationEngine == TranslationEngine.OFFLINE_OPUS &&
-                !isOfflineOpusDirection(nextA, nextB)
+            current.translationEngine.isOfflineOpus() &&
+                !isOfflineOpusDirection(current.translationEngine, nextA, nextB)
         _uiState.update {
             it.copy(
                 languageA = nextA,
@@ -111,8 +138,13 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 textA = "",
                 textB = "",
                 resultSide = null,
+                activeSttEngine = null,
                 status = if (offlineBecameUnavailable) VoiceStatus.ERROR else VoiceStatus.READY,
-                error = if (offlineBecameUnavailable) OFFLINE_PAIR_MESSAGE else null,
+                error = if (offlineBecameUnavailable) {
+                    offlinePairMessage(current.translationEngine)
+                } else {
+                    null
+                },
             )
         }
     }
@@ -120,15 +152,17 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     fun setTranslationOption(option: TranslationOption) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
         val state = _uiState.value
-        if (option.engine == TranslationEngine.OFFLINE_OPUS && !state.offlineRuntimeAvailable) {
+        if (option.engine.isOfflineOpus() && !state.offlineRuntimeAvailable) {
             _uiState.update { it.copy(status = VoiceStatus.ERROR, error = OFFLINE_RUNTIME_MESSAGE) }
             return
         }
         if (
-            option.engine == TranslationEngine.OFFLINE_OPUS &&
-            !isOfflineOpusDirection(state.languageA, state.languageB)
+            option.engine.isOfflineOpus() &&
+            !isOfflineOpusDirection(option.engine, state.languageA, state.languageB)
         ) {
-            _uiState.update { it.copy(status = VoiceStatus.ERROR, error = OFFLINE_PAIR_MESSAGE) }
+            _uiState.update {
+                it.copy(status = VoiceStatus.ERROR, error = offlinePairMessage(option.engine))
+            }
             return
         }
         _uiState.update {
@@ -159,6 +193,18 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun downloadOfflineIneModel() {
+        if (_uiState.value.offlineIneModelStatus is OfflineModelStatus.Downloading) return
+        viewModelScope.launch { offlineIneModelManager.downloadAndInstall() }
+    }
+
+    fun deleteOfflineIneModel() {
+        viewModelScope.launch {
+            offlineIneTranslationProvider.close()
+            offlineIneModelManager.deleteModel()
+        }
+    }
+
     fun downloadWhisperModel() {
         if (_uiState.value.whisperModelStatus is OfflineModelStatus.Downloading) return
         viewModelScope.launch { whisperModelManager.downloadAndInstall() }
@@ -173,12 +219,12 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setSttEngine(engine: SttEngine) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
-        if (engine == SttEngine.WHISPER_OFFLINE && !_uiState.value.whisperRuntimeAvailable) {
+        if (engine.isWhisperOffline() && !_uiState.value.whisperRuntimeAvailable) {
             _uiState.update { it.copy(status = VoiceStatus.ERROR, error = WHISPER_RUNTIME_MESSAGE) }
             return
         }
         settings.sttEngine = engine
-        _uiState.update { it.copy(sttEngine = engine, error = null) }
+        _uiState.update { it.copy(sttEngine = engine, activeSttEngine = null, error = null) }
     }
 
     fun saveApiKey(apiKey: String): Boolean = runCatching {
@@ -244,47 +290,39 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
             showError(IllegalStateException("Gemini API key is not configured in this build."))
             return
         }
-        if (state.translationEngine == TranslationEngine.OFFLINE_OPUS) {
+        if (state.translationEngine.isOfflineOpus()) {
             if (!state.offlineRuntimeAvailable) {
                 showError(IllegalStateException(OFFLINE_RUNTIME_MESSAGE))
                 return
             }
-            if (!isOfflineOpusDirection(state.languageA, state.languageB)) {
-                showError(IllegalStateException(OFFLINE_PAIR_MESSAGE))
+            if (
+                !isOfflineOpusDirection(
+                    state.translationEngine,
+                    state.languageA,
+                    state.languageB,
+                )
+            ) {
+                showError(IllegalStateException(offlinePairMessage(state.translationEngine)))
                 return
             }
-            if (state.offlineModelStatus !is OfflineModelStatus.Installed) {
-                showError(IllegalStateException("Download the offline OPUS model in Settings first."))
-                return
-            }
-        }
-        if (state.sttEngine == SttEngine.WHISPER_OFFLINE) {
-            if (!state.whisperRuntimeAvailable) {
-                showError(IllegalStateException(WHISPER_RUNTIME_MESSAGE))
-                return
-            }
-            if (state.whisperModelStatus !is OfflineModelStatus.Installed) {
+            if (offlineModelStatus(state, state.translationEngine) !is OfflineModelStatus.Installed) {
                 showError(
-                    IllegalStateException("Download the Whisper Offline model in Settings first."),
+                    IllegalStateException(
+                        "Download the selected offline OPUS model in Settings first.",
+                    ),
                 )
                 return
             }
         }
         val language = if (side == LanguageSide.A) state.languageA else state.languageB
         val generation = ++turnGeneration
-        val provider = when (state.sttEngine) {
-            SttEngine.SYSTEM -> systemProvider
-            SttEngine.GROQ -> groqProvider
-            SttEngine.WHISPER_OFFLINE -> whisperProvider
-        }
         systemTtsProvider.stop()
-        activeSttProvider = provider
-        recordingStartedAtMs = SystemClock.elapsedRealtime()
-        var firstPartialLogged = false
         _uiState.update {
             it.copy(
-                status = VoiceStatus.LISTENING,
+                status = VoiceStatus.RECOGNIZING,
                 activeSide = side,
+                activeSttEngine = null,
+                partialTranscriptSide = null,
                 textA = "",
                 textB = "",
                 resultSide = null,
@@ -292,9 +330,29 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 error = null,
             )
         }
-        startTimer()
         viewModelScope.launch {
             runCatching {
+                val resolvedEngine = if (state.sttEngine == SttEngine.AUTO) {
+                    autoSttRouter.resolve(language)
+                } else {
+                    state.sttEngine
+                }
+                if (generation != turnGeneration) return@launch
+                if (state.sttEngine == SttEngine.AUTO) {
+                    Log.i(
+                        TIMING_TAG,
+                        "event=auto_stt_resolved language=${language.code} " +
+                            "engine=${resolvedEngine.name.lowercase()}",
+                    )
+                }
+                _uiState.update { it.copy(activeSttEngine = resolvedEngine) }
+                validateSttEngine(resolvedEngine)
+                val provider = sttProviderFor(resolvedEngine)
+                activeSttProvider = provider
+                recordingStartedAtMs = SystemClock.elapsedRealtime()
+                var firstPartialLogged = false
+                _uiState.update { it.copy(status = VoiceStatus.LISTENING) }
+                startTimer()
                 provider.start(language, onPartialResult = partialResult@{ partial ->
                     if (generation != turnGeneration || partial.isBlank()) return@partialResult
                     if (!firstPartialLogged) {
@@ -308,9 +366,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                         if (current.status != VoiceStatus.LISTENING || current.activeSide != side) {
                             current
                         } else if (side == LanguageSide.A) {
-                            current.copy(textA = partial)
+                            current.copy(textA = partial, partialTranscriptSide = side)
                         } else {
-                            current.copy(textB = partial)
+                            current.copy(textB = partial, partialTranscriptSide = side)
                         }
                     }
                 })
@@ -340,21 +398,29 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 logTiming("stt_final_after_stop_tap", SystemClock.elapsedRealtime() - stoppedAt)
                 if (generation != turnGeneration) return@launch
                 activeSttProvider = null
+                if (snapshot.activeSttEngine == SttEngine.SYSTEM) {
+                    autoSttRouter.recordAndroidSuccess(sourceLanguage)
+                }
                 _uiState.update {
-                    if (sourceSide == LanguageSide.A) it.copy(textA = transcript)
-                    else it.copy(textB = transcript)
+                    if (sourceSide == LanguageSide.A) {
+                        it.copy(textA = transcript, partialTranscriptSide = null)
+                    } else {
+                        it.copy(textB = transcript, partialTranscriptSide = null)
+                    }
                 }
 
                 val translationProvider = when (snapshot.translationEngine) {
                     TranslationEngine.OPENAI -> openAiTranslationProvider
                     TranslationEngine.GEMINI -> geminiTranslationProvider
-                    TranslationEngine.OFFLINE_OPUS -> offlineTranslationProvider
+                    TranslationEngine.OFFLINE_OPUS_SLAVIC -> offlineTranslationProvider
+                    TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN -> offlineIneTranslationProvider
                 }
                 val apiKey = when (snapshot.translationEngine) {
                     TranslationEngine.OPENAI -> apiKeyStore.load()
                         ?: error("The saved OpenAI API key could not be read. Save it again in settings.")
                     TranslationEngine.GEMINI -> BuildConfig.GEMINI_API_KEY
-                    TranslationEngine.OFFLINE_OPUS -> ""
+                    TranslationEngine.OFFLINE_OPUS_SLAVIC -> ""
+                    TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN -> ""
                 }
                 _uiState.update { it.copy(status = VoiceStatus.TRANSLATING) }
                 val translationStartedAt = SystemClock.elapsedRealtime()
@@ -395,6 +461,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
             } catch (throwable: Throwable) {
                 provider.cancel()
                 if (generation == turnGeneration) {
+                    if (snapshot.activeSttEngine == SttEngine.SYSTEM) {
+                        autoSttRouter.recordAndroidFailure(sourceLanguage, throwable)
+                    }
                     activeSttProvider = null
                     showError(throwable)
                 }
@@ -418,12 +487,50 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    private fun validateSttEngine(engine: SttEngine) {
+        val state = _uiState.value
+        when (engine) {
+            SttEngine.AUTO -> error("Auto speech recognition did not resolve an engine.")
+            SttEngine.SYSTEM -> Unit
+            SttEngine.GROQ -> if (BuildConfig.GROQ_API_KEY.isBlank()) {
+                error("Groq API key is not configured in this build.")
+            }
+            SttEngine.WHISPER_OFFLINE,
+            SttEngine.WHISPER_OFFLINE_LIVE,
+            -> {
+                if (!state.whisperRuntimeAvailable) error(WHISPER_RUNTIME_MESSAGE)
+                if (state.whisperModelStatus !is OfflineModelStatus.Installed) {
+                    val message = if (state.sttEngine == SttEngine.AUTO) {
+                        "No Android offline speech pack or usable internet connection was found. " +
+                            "Download the Whisper Offline model in Settings first."
+                    } else {
+                        "Download the Whisper Offline model in Settings first."
+                    }
+                    error(message)
+                }
+            }
+        }
+    }
+
+    private fun sttProviderFor(engine: SttEngine): SttProvider = when (engine) {
+        SttEngine.AUTO -> error("Auto speech recognition did not resolve an engine.")
+        SttEngine.SYSTEM -> systemProvider
+        SttEngine.GROQ -> groqProvider
+        SttEngine.WHISPER_OFFLINE -> whisperProvider.also {
+            it.setLivePartialsEnabled(false)
+        }
+        SttEngine.WHISPER_OFFLINE_LIVE -> whisperProvider.also {
+            it.setLivePartialsEnabled(true)
+        }
+    }
+
     private fun showError(throwable: Throwable) {
         timerJob?.cancel()
         _uiState.update {
             it.copy(
                 status = VoiceStatus.ERROR,
                 activeSide = null,
+                partialTranscriptSide = null,
                 elapsedSeconds = 0,
                 error = throwable.message ?: "Something went wrong.",
             )
@@ -438,6 +545,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         systemTtsProvider.release()
         runBlocking { whisperProvider.release() }
         offlineTranslationProvider.close()
+        offlineIneTranslationProvider.close()
         super.onCleared()
     }
 
@@ -445,11 +553,27 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         Log.i(TIMING_TAG, "stage=$stage duration_ms=$durationMs")
     }
 
+    private fun offlineModelStatus(
+        state: TranslatorUiState,
+        engine: TranslationEngine,
+    ): OfflineModelStatus = when (engine) {
+        TranslationEngine.OFFLINE_OPUS_SLAVIC -> state.offlineModelStatus
+        TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN -> state.offlineIneModelStatus
+        else -> error("Not an offline OPUS engine: $engine")
+    }
+
+    private fun offlinePairMessage(engine: TranslationEngine): String = when (engine) {
+        TranslationEngine.OFFLINE_OPUS_SLAVIC ->
+            "OPUS Slavic FP32 supports Russian ↔ Serbian or Croatian only. " +
+                "Choose a cloud model for this pair."
+        TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN ->
+            "OPUS Indo-European FP32 supports Russian ↔ Romanian or Spanish only. " +
+                "Choose a cloud model for this pair."
+        else -> "The selected offline OPUS model does not support this language pair."
+    }
+
     private companion object {
         const val TIMING_TAG = "SayItTiming"
-        const val OFFLINE_PAIR_MESSAGE =
-            "Offline OPUS supports Russian ↔ Serbian or Croatian only. " +
-                "Choose a cloud model for this pair."
         const val OFFLINE_RUNTIME_MESSAGE =
             "Offline OPUS requires an arm64 phone running Android 9 or newer."
         const val WHISPER_RUNTIME_MESSAGE =

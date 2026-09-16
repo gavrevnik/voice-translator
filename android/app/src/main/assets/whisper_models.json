@@ -1,12 +1,12 @@
 {
-  "id": "whisper-base-q5_1",
+  "id": "whisper-small-q5_1",
   "version": "1",
-  "displayName": "Whisper Base Multilingual Q5_1",
-  "filename": "ggml-base-q5_1.bin",
-  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-whisper-base-q5_1-v1/ggml-base-q5_1.bin",
-  "sha256": "80147c665f9ac54ab8c3c7f55da90ac030ea40610495ba4dd0aa6304fd49d731",
-  "downloadSize": 59707625,
-  "installedSize": 59707625,
+  "displayName": "Whisper Small Multilingual Q5_1",
+  "filename": "ggml-small-q5_1.bin",
+  "downloadUrl": "https://github.com/gavrevnik/voice-translator/releases/download/offline-whisper-small-q5_1-v1/ggml-small-q5_1.bin",
+  "sha256": "52914f6730a59593fd6108d21dcac060a35ce569d9d70eec431e5623f387c82f",
+  "downloadSize": 190085487,
+  "installedSize": 190085487,
   "runtimeType": "whisper.cpp",
   "runtimeVersion": "da54572229bcf64ba367d96c7ef15770376c4280"
 }

@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 class OfflineOpusTranslationProvider(
     context: Context,
     private val modelManager: OfflineModelManager,
+    private val family: OfflineOpusFamily,
 ) : TranslationProvider {
     private val appContext = context.applicationContext
     private var loadedModel: NativeTranslationModel? = null
@@ -24,13 +25,13 @@ class OfflineOpusTranslationProvider(
         serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {
         require(modelManager.supports(sourceLanguage, targetLanguage)) {
-            "Offline OPUS supports Russian ↔ Serbian or Croatian only. " +
-                "Choose a cloud model for this pair."
+            "${modelManager.manifest.displayName} does not support this language pair. " +
+                "Choose a compatible offline or cloud model."
         }
         val translation = synchronized(this@OfflineOpusTranslationProvider) {
             val runtimeModel = loadedModel ?: loadModel().also { loadedModel = it }
             runtimeModel.translate(
-                offlineOpusInput(targetLanguage, serbianScript, transcript),
+                offlineOpusInput(family, targetLanguage, serbianScript, transcript),
                 isHtml = false,
             ).text.trim()
         }
@@ -53,8 +54,8 @@ class OfflineOpusTranslationProvider(
         }
         return TranslateKit.loadModel(
             ModelSpec(
-                sourceLang = "sla",
-                targetLang = "sla",
+                sourceLang = family.groupCode,
+                targetLang = family.groupCode,
                 modelPath = files.model.absolutePath,
                 vocabPaths = listOf(files.sourceVocab.absolutePath, files.targetVocab.absolutePath),
                 shortlistPath = files.shortlist.absolutePath,
@@ -65,16 +66,32 @@ class OfflineOpusTranslationProvider(
     }
 }
 
+enum class OfflineOpusFamily(val groupCode: String) {
+    SLAVIC("sla"),
+    INDO_EUROPEAN("ine"),
+}
+
 internal fun offlineOpusInput(
+    family: OfflineOpusFamily,
     targetLanguage: AppLanguage,
     serbianScript: SerbianScript,
     transcript: String,
 ): String {
-    val targetToken = when (targetLanguage) {
-        AppLanguage.RUSSIAN -> ">>rus<<"
-        AppLanguage.SERBIAN -> serbianScript.targetToken
-        AppLanguage.CROATIAN -> ">>hrv<<"
-        else -> error("Unsupported offline target language: ${targetLanguage.canonicalName}")
+    val targetToken = when (family) {
+        OfflineOpusFamily.SLAVIC -> when (targetLanguage) {
+            AppLanguage.RUSSIAN -> ">>rus<<"
+            AppLanguage.SERBIAN -> serbianScript.targetToken
+            AppLanguage.CROATIAN -> ">>hrv<<"
+            else -> error("Unsupported Slavic target language: ${targetLanguage.canonicalName}")
+        }
+        OfflineOpusFamily.INDO_EUROPEAN -> when (targetLanguage) {
+            AppLanguage.RUSSIAN -> ">>rus<<"
+            AppLanguage.SPANISH -> ">>spa<<"
+            AppLanguage.ROMANIAN -> ">>ron<<"
+            else -> error(
+                "Unsupported Indo-European target language: ${targetLanguage.canonicalName}",
+            )
+        }
     }
     return "$targetToken ${transcript.trim()}"
 }

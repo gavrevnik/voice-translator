@@ -31,7 +31,8 @@ enum class GeminiTranslationModel(val id: String) {
 enum class TranslationEngine(val label: String) {
     OPENAI("OpenAI API"),
     GEMINI("Gemini Flash"),
-    OFFLINE_OPUS("OPUS Slavic — Offline"),
+    OFFLINE_OPUS_SLAVIC("OPUS Slavic FP32 — Offline"),
+    OFFLINE_OPUS_INDO_EUROPEAN("OPUS Indo-European FP32 — Offline"),
 }
 
 enum class SerbianScript(val label: String, val targetToken: String) {
@@ -40,9 +41,11 @@ enum class SerbianScript(val label: String, val targetToken: String) {
 }
 
 enum class SttEngine(val label: String, val progressLabel: String) {
+    AUTO("Auto", "Auto"),
     SYSTEM("Android Speech", "Android"),
     GROQ("Groq Whisper", "Groq Whisper"),
     WHISPER_OFFLINE("Whisper Offline", "Whisper Offline"),
+    WHISPER_OFFLINE_LIVE("Whisper Offline Live", "Whisper Live"),
 }
 
 enum class TranslationOption(
@@ -70,7 +73,16 @@ enum class TranslationOption(
         TranslationEngine.GEMINI,
         geminiModel = GeminiTranslationModel.FLASH_3_5_LITE,
     ),
-    OFFLINE_OPUS("OPUS Slavic — Offline", "Slavic Offline", TranslationEngine.OFFLINE_OPUS),
+    OFFLINE_OPUS_SLAVIC(
+        "OPUS Slavic FP32 — Offline",
+        "Slavic FP32",
+        TranslationEngine.OFFLINE_OPUS_SLAVIC,
+    ),
+    OFFLINE_OPUS_INDO_EUROPEAN(
+        "OPUS Indo-European FP32 — Offline",
+        "INE FP32",
+        TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN,
+    ),
     ;
 
     companion object {
@@ -103,16 +115,20 @@ data class TranslatorUiState(
     val model: TranslationModel = TranslationModel.LUNA,
     val geminiModel: GeminiTranslationModel = GeminiTranslationModel.FLASH_3_1_LITE,
     val translationEngine: TranslationEngine = TranslationEngine.GEMINI,
-    val sttEngine: SttEngine = SttEngine.SYSTEM,
+    val sttEngine: SttEngine = SttEngine.AUTO,
+    val activeSttEngine: SttEngine? = null,
     val serbianScript: SerbianScript = SerbianScript.LATIN,
     val offlineModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
     val offlineModelDownloadSizeLabel: String = "",
     val offlineRuntimeAvailable: Boolean = true,
+    val offlineIneModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
+    val offlineIneModelDownloadSizeLabel: String = "",
     val whisperModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
     val whisperModelDownloadSizeLabel: String = "",
     val whisperRuntimeAvailable: Boolean = true,
     val status: VoiceStatus = VoiceStatus.READY,
     val activeSide: LanguageSide? = null,
+    val partialTranscriptSide: LanguageSide? = null,
     val textA: String = "",
     val textB: String = "",
     val resultSide: LanguageSide? = null,
@@ -122,11 +138,52 @@ data class TranslatorUiState(
 )
 
 const val GROQ_STT_MODEL = "whisper-large-v3"
-const val WHISPER_OFFLINE_MODEL = "base-q5_1"
+const val WHISPER_OFFLINE_MODEL = "small-q5_1"
 const val PLAYBACK_PROGRESS_LABEL = "Android"
 
-fun isOfflineOpusDirection(languageA: AppLanguage, languageB: AppLanguage): Boolean =
+fun recognitionProgressLabel(selected: SttEngine, active: SttEngine?): String =
+    if (selected == SttEngine.AUTO && active != null && active != SttEngine.AUTO) {
+        "Auto (${active.progressLabel})"
+    } else {
+        selected.progressLabel
+    }
+
+internal fun chooseAutoSttEngine(
+    androidAvailability: AndroidSttAvailability,
+    internetAvailable: Boolean,
+    groqConfigured: Boolean,
+): SttEngine = when {
+    androidAvailability != AndroidSttAvailability.UNAVAILABLE -> SttEngine.SYSTEM
+    internetAvailable && groqConfigured -> SttEngine.GROQ
+    else -> SttEngine.WHISPER_OFFLINE_LIVE
+}
+
+fun SttEngine.isWhisperOffline(): Boolean =
+    this == SttEngine.WHISPER_OFFLINE || this == SttEngine.WHISPER_OFFLINE_LIVE
+
+fun isOfflineSlavicDirection(languageA: AppLanguage, languageB: AppLanguage): Boolean =
     (languageA == AppLanguage.RUSSIAN &&
         languageB in setOf(AppLanguage.SERBIAN, AppLanguage.CROATIAN)) ||
         (languageB == AppLanguage.RUSSIAN &&
             languageA in setOf(AppLanguage.SERBIAN, AppLanguage.CROATIAN))
+
+fun isOfflineIndoEuropeanDirection(languageA: AppLanguage, languageB: AppLanguage): Boolean =
+    (languageA == AppLanguage.RUSSIAN &&
+        languageB in setOf(AppLanguage.ROMANIAN, AppLanguage.SPANISH)) ||
+        (languageB == AppLanguage.RUSSIAN &&
+            languageA in setOf(AppLanguage.ROMANIAN, AppLanguage.SPANISH))
+
+fun isOfflineOpusDirection(
+    engine: TranslationEngine,
+    languageA: AppLanguage,
+    languageB: AppLanguage,
+): Boolean = when (engine) {
+    TranslationEngine.OFFLINE_OPUS_SLAVIC -> isOfflineSlavicDirection(languageA, languageB)
+    TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN ->
+        isOfflineIndoEuropeanDirection(languageA, languageB)
+    else -> false
+}
+
+fun TranslationEngine.isOfflineOpus(): Boolean =
+    this == TranslationEngine.OFFLINE_OPUS_SLAVIC ||
+        this == TranslationEngine.OFFLINE_OPUS_INDO_EUROPEAN

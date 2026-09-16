@@ -15,7 +15,7 @@ class AppSettings(context: Context) {
     }
 
     var sttEngine: SttEngine
-        get() = enumValue(preferences.getString(KEY_STT, null), SttEngine.SYSTEM)
+        get() = enumValue(preferences.getString(KEY_STT, null), SttEngine.AUTO)
         set(value) = preferences.edit().putString(KEY_STT, value.name).apply()
 
     var serbianScript: SerbianScript

@@ -4,45 +4,52 @@
 
 ## Движки
 
-- Распознавание: **Android/Samsung SpeechRecognizer** по умолчанию, **Groq Whisper Large V3** или локальный **Whisper Offline** (`base-q5_1`, multilingual).
-- Перевод: **Gemini Flash-Lite** по умолчанию с выбором `gemini-3.1-flash-lite` или `gemini-3.5-flash-lite`; обе используют thinking `minimal`. Альтернативы — **OpenAI API** с `gpt-5.6-luna` и фиксированным reasoning `none`, а также **OPUS Slavic — Offline** для `Russian ↔ Serbian` и `Russian ↔ Croatian`.
+- Распознавание: **Auto** по умолчанию, а также ручные **Android/Samsung SpeechRecognizer**, **Groq Whisper Large V3**, локальный пакетный **Whisper Offline** и **Whisper Offline Live** (`small-q5_1`, multilingual).
+- Перевод: **Gemini Flash-Lite** по умолчанию с выбором `gemini-3.1-flash-lite` или `gemini-3.5-flash-lite`; обе используют thinking `minimal`. Альтернативы — **OpenAI API** с `gpt-5.6-luna` и фиксированным reasoning `none`, полноточный **OPUS Slavic FP32 — Offline** для `Russian ↔ Serbian/Croatian` и **OPUS Indo-European FP32 — Offline** для `Russian ↔ Romanian/Spanish`.
 - Озвучивание: только **Android System TTS**.
 
 OpenAI-ключ вводится пользователем в настройках приложения и хранится с AES-GCM на ключе из Android Keystore. Gemini translation использует `GEMINI_API_KEY`, а Groq STT — `GROQ_API_KEY`; оба значения читаются из корневого `.env` во время сборки.
 
 Офлайн OPUS отвечает только за перевод. Для полностью автономной цепочки можно выбрать Whisper Offline вместо системного STT; Android TTS всё равно требует установленный локальный голос целевого языка. Приложение выбирает только TTS-голос, не требующий сети, и выводит отдельные понятные ошибки для отсутствующего голоса, неподдерживаемого системного языка распознавания (`error 12`) и нескачанной системной модели распознавания (`error 13`).
 
-Главный экран рассчитан на узкие телефоны: селекторы языков и кнопки речи компактны, а исходная фраза и перевод идут полноширинными карточками друг под другом, растут по содержимому и прокручиваются вместе с экраном. Нажатие на любую заполненную карточку открывает текст на весь экран, а перевод можно скопировать отдельной кнопкой. Однострочная шкала показывает короткие имена реально выбранных движков, например `Android → Gemini 3.1 → Android`; справа во время записи виден таймер, а во время озвучивания — квадратная кнопка остановки.
+Главный экран рассчитан на узкие телефоны: селекторы языков и кнопки речи компактны, а исходная фраза и перевод идут полноширинными карточками друг под другом, растут по содержимому и прокручиваются вместе с экраном. Нажатие на любую заполненную карточку открывает текст на весь экран, а перевод можно скопировать отдельной кнопкой. Однострочная шкала показывает короткие имена реально выбранных движков, например `Auto (Whisper Live) → Gemini 3.1 → Android`; справа во время записи виден таймер, а во время озвучивания — квадратная кнопка остановки.
 
 Настройки открываются отдельным прокручиваемым экраном. В порядке pipeline идут списки распознавания и перевода; Android TTS теперь фиксирован и не требует отдельного выбора. Ниже показываются только статусы API-ключей. OpenAI-ключ добавляется или заменяется в отдельном защищённом диалоге. Системная инструкция перевода совпадает с веб-версией, содержит канонические имена и коды языков, а transcript отправляется отдельным user input.
 
+В режиме распознавания **Auto** приложение проверяет установленный Android offline-пакет именно для языка нажатой кнопки. Если пакет готов — используется системный Android STT с offline-предпочтением. Если пакет явно отсутствует, но Android подтверждает рабочее интернет-соединение и Groq-ключ настроен, используется Groq Whisper; без интернета выбирается Whisper Offline Live. Если системная служба не умеет достоверно проверить поддержку, сначала используется Android. Успешная пара «сервис + язык» запоминается, а ошибки отсутствующего языка 12/13 включают fallback для следующих попыток; отрицательная запись перепроверяется через час. Фактический выбор сохраняется до конца цикла фразы и отображается в прогрессе как `Auto (…)`.
+
 ## Whisper Offline
 
-Локальное распознавание использует multilingual Whisper Base в квантизации `Q5_1`. Оно доступно для всех шести языков приложения и не зависит от языковых пакетов Samsung/Google. Нативный arm64 runtime входит в APK, а веса скачиваются отдельно после выбора **Whisper Offline** в настройках:
+Локальное распознавание использует multilingual Whisper Small в квантизации `Q5_1`. Оно доступно для всех шести языков приложения и не зависит от языковых пакетов Samsung/Google. Нативный arm64 runtime входит в APK, а веса скачиваются отдельно после выбора одного из Whisper Offline-режимов в настройках:
 
-- модель: `ggml-base-q5_1.bin`;
-- скачивание и размер после установки: `59 707 625` байт (59,7 MB);
-- SHA-256: `80147c665f9ac54ab8c3c7f55da90ac030ea40610495ba4dd0aa6304fd49d731`;
-- локальный artifact: `model-packs/ggml-base-q5_1.bin` (игнорируется Git).
+- модель: `ggml-small-q5_1.bin`;
+- скачивание и размер после установки: `190 085 487` байт (190,1 MB);
+- SHA-256: `52914f6730a59593fd6108d21dcac060a35ce569d9d70eec431e5623f387c82f`;
+- локальный artifact: `model-packs/ggml-small-q5_1.bin` (игнорируется Git).
 
-Delivery manifest находится в `app/src/main/assets/whisper_models.json` и указывает на GitHub Release `offline-whisper-base-q5_1-v1`. До публикации asset `ggml-base-q5_1.bin` встроенная загрузка вернёт 404. URL можно переопределить через `OFFLINE_WHISPER_MODEL_URL` в корневом `.env`. Квантизация исходной multilingual Base-модели воспроизводится командой `tools/quantize_whisper_model.sh`; нативный runtime собран из закреплённого commit `whisper.cpp` и хранится в `app/libs/whisperlib-release.aar` без весов.
+Delivery manifest находится в `app/src/main/assets/whisper_models.json` и указывает на GitHub Release `offline-whisper-small-q5_1-v1`. URL можно переопределить через `OFFLINE_WHISPER_MODEL_URL` в корневом `.env`. Квантизация исходной multilingual Small-модели воспроизводится командой `tools/quantize_whisper_model.sh`; нативный runtime собран из закреплённого commit `whisper.cpp` и хранится в `app/libs/whisperlib-release.aar` без весов. При первом запуске обновлённой версии каталог снятой с поддержки Base-модели удаляется автоматически.
 
-## OPUS Slavic — Offline
+`Whisper Offline` выполняет один decode после Stop. `Whisper Offline Live` каждые 1000 мс последовательно декодирует rolling-window последних 8 секунд, передавая заранее выбранный код языка и небольшой текстовый prompt из уже собранного контекста. Одновременно выполняется не больше одного inference, поэтому очередь запросов не растёт. Второе нажатие останавливает запись и запускает отдельный beam-search decode всей сохранённой записи; только его результат передаётся в перевод. Partial-текст отмечен в UI и показан менее контрастно.
 
-Android использует квантизованный `Helsinki-NLP/opus-mt-sla-sla` через Bergamot/Marian и локально собранный `translate-kit` AAR. Исходная модель знает более широкий набор славянских вариантов (`bel`, `bos_Latn`, `bul`, `ces`, `hrv`, `mkd`, `pol`, `rus`, `slv`, `srp_Latn`, `srp_Cyrl`, `ukr` и другие), но приложение разрешает провайдер только для пар `ru ↔ sr` и `ru ↔ hr`. При другой паре пункт неактивен, а дополнительная проверка в ViewModel и provider не позволяет обойти ограничение.
+Замеры пишутся с тегом `SayItTiming`: latency первого partial, средний интервал обновлений, длительность partial/final decode, Stop-to-final, process CPU time, PSS и overrun относительно секундного интервала. На подключённом телефоне их можно смотреть через `adb logcat -s SayItTiming`.
+
+## OPUS Slavic FP32 — Offline
+
+Android использует полноточный `Helsinki-NLP/opus-mt-sla-sla` через Bergamot/Marian и локально собранный `translate-kit` AAR. Исходная модель знает более широкий набор славянских вариантов (`bel`, `bos_Latn`, `bul`, `ces`, `hrv`, `mkd`, `pol`, `rus`, `slv`, `srp_Latn`, `srp_Cyrl`, `ukr` и другие), но приложение разрешает провайдер только для пар `ru ↔ sr` и `ru ↔ hr`. При другой паре пункт неактивен, а дополнительная проверка в ViewModel и provider не позволяет обойти ограничение.
 
 Для направления RU→SR доступны `>>srp_Latn<<` (по умолчанию) и `>>srp_Cyrl<<`; RU→HR использует `>>hrv<<`; для обратных направлений используется `>>rus<<`. Автоопределение языка этому provider не требуется. Android Speech и Android TTS используют для хорватского системную локаль `hr-HR`, поэтому их офлайн-работа зависит от установленных Google-пакетов распознавания и голоса.
 
 ModelManager поддерживает состояния `NotInstalled`, `Downloading(progress)`, `Installed`, `Invalid` и `Error`, проверяет SHA-256 архива и каждого runtime-файла, безопасно распаковывает ZIP и хранит модель в `filesDir`, поэтому обычное обновление APK её не удаляет. Веса не входят в APK и Git:
 
-- скачивание: `45 045 954` байт (45,0 MB);
-- после установки: `66 813 730` байт (66,8 MB);
-- основной INT8-файл: `64 176 671` байт;
-- локальный готовый artifact: `model-packs/offline-opus-sla-int8-v1.zip` (игнорируется Git).
+- скачивание: `237 545 582` байта (237,5 MB);
+- после установки: `257 555 545` байт (257,6 MB);
+- основной FP32-файл: `254 918 431` байт;
+- SHA-256 пакета: `eaac8da16c466928fdfc23bd23dc9a296f1f373d2433c19bc7b8006a8b254298`;
+- локальный готовый artifact: `offline-opus-sla-fp32-v1.zip` (игнорируется Git).
 
-Delivery manifest находится в `app/src/main/assets/offline_models.json`. Его стандартный URL указывает на GitHub Release `offline-opus-sla-v1`; до публикации одноимённого release asset встроенная загрузка вернёт 404. Для локального/CDN-теста можно задать `OFFLINE_OPUS_MODEL_URL` в корневом `.env` перед сборкой.
+Delivery manifest находится в `app/src/main/assets/offline_models.json`. Его стандартный URL указывает на GitHub Release `offline-opus-sla-fp32-v1`. Для локального/CDN-теста можно задать `OFFLINE_OPUS_MODEL_URL` в корневом `.env` перед сборкой.
 
-Воспроизводимая конвертация исходного Marian checkpoint в `intgemm8`, сборка совместимых SentencePiece-словарей и shortlist выполняются скриптом:
+Воспроизводимая конвертация исходного Marian checkpoint в Bergamot FP32 без квантования, сборка совместимых SentencePiece-словарей и shortlist выполняются скриптом:
 
 ```bash
 python3 tools/build_offline_opus_pack.py \
@@ -52,7 +59,30 @@ python3 tools/build_offline_opus_pack.py \
   --app-manifest app/src/main/assets/offline_models.json
 ```
 
-Скрипт при отсутствии `--source-dir` сам скачивает закреплённый архив OPUS и проверяет его checksum. Web-сравнение original/quantized в этот pipeline намеренно не входит. JNI AAR без локальных изменений можно пересобрать из закреплённого upstream commit командой `tools/build_translate_kit_aar.sh`; лицензии и notices лежат в `app/libs/`.
+Скрипт при отсутствии `--source-dir` сам скачивает закреплённый архив OPUS и проверяет его checksum. JNI AAR без локальных изменений можно пересобрать из закреплённого upstream commit командой `tools/build_translate_kit_aar.sh`; лицензии и notices лежат в `app/libs/`. При обновлении приложения старый каталог `opus-mt-sla-sla-int8` удаляется автоматически.
+
+## OPUS Indo-European FP32 — Offline
+
+`Helsinki-NLP/opus-mt-ine-ine` содержит русский (`rus`), румынский (`ron`) и испанский (`spa`) одновременно в исходном и целевом наборах. Приложение системно разрешает полноточную модель только для `ru ↔ ro` и `ru ↔ es`; для выбора целевого языка используются токены `>>rus<<`, `>>ron<<` и `>>spa<<`.
+
+- скачивание: `246 415 142` байта (246,4 MB);
+- после установки: `266 886 894` байта (266,9 MB);
+- основной FP32-файл: `264 273 439` байт;
+- SHA-256 пакета: `e55bdd5d085b6ec6fcf656b4b27352b0e5cdfe1276c6bfeb99180d4e79f8b1ba`;
+- GitHub Release: `offline-opus-ine-fp32-v1`;
+- локальный artifact: `offline-opus-ine-fp32-v1.zip` (игнорируется Git).
+
+Delivery manifest находится в `app/src/main/assets/offline_models_ine.json`; URL можно переопределить через `OFFLINE_OPUS_INE_MODEL_URL`. Воспроизводимая сборка выполняется тем же pipeline:
+
+```bash
+python3 tools/build_offline_opus_ine_pack.py \
+  --marian-conv /path/to/x86_64/marian-conv \
+  --work-dir /tmp/sayit-opus-ine-build \
+  --output-dir model-packs \
+  --app-manifest app/src/main/assets/offline_models_ine.json
+```
+
+Обе карточки установки видны в настройках независимо от выбранного облачного или офлайн-провайдера. Старый каталог `opus-mt-itc-itc-int8` удаляется автоматически.
 
 ## Сборка
 
@@ -79,7 +109,7 @@ Release APK будет создан в `app/build/outputs/apk/release/`. Build-�
 3. Нажмите ту же кнопку ещё раз: финальный текст будет переведён и озвучен.
 4. Кнопка **Stop** останавливает воспроизведение; кнопка play повторяет последний перевод.
 
-System SpeechRecognizer может показывать частичный текст во время записи. Groq и Whisper Offline работают пакетно и возвращают результат после остановки. В APK входит только нативный Whisper runtime; 59,7 MB весов загружаются и хранятся отдельно в app-private storage.
+System SpeechRecognizer может показывать частичный текст во время записи. Поскольку системный сервис завершает отдельную сессию после паузы или внутреннего лимита, приложение автоматически запускает следующую и объединяет соседние результаты без повторов. На границе возможна короткая пауза. Groq и Whisper Offline записывают аудио непрерывно и возвращают результат после остановки. В APK входит только нативный Whisper runtime; 190,1 MB весов загружаются и хранятся отдельно в app-private storage.
 
 Для диагностики задержек используйте:
 

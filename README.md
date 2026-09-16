@@ -8,19 +8,23 @@
 
 Каждый голосовой запрос проходит три этапа: `STT → Translate → TTS`.
 
-На Android однострочная шкала показывает сокращённые имена реально выбранных движков, например `Android → Gemini 3.1 → Android`: справа во время записи появляется таймер, а во время озвучивания — компактная квадратная кнопка остановки. Конкретные провайдеры и модели выбираются на отдельном экране настроек.
+На Android однострочная шкала показывает сокращённые имена реально выбранных движков, например `Auto (Groq Whisper) → Gemini 3.1 → Android`: справа во время записи появляется таймер, а во время озвучивания — компактная квадратная кнопка остановки. Конкретные провайдеры и модели выбираются на отдельном экране настроек.
 
 | Этап | Web | Android |
 | --- | --- | --- |
-| **STT** — речь → текст | **Browser STT** (`SpeechRecognition`) по умолчанию или **Groq Whisper Large V3** (`whisper-large-v3`) | **Android/Samsung SpeechRecognizer** по умолчанию, **Groq Whisper Large V3** (`whisper-large-v3`) или локальный multilingual **Whisper Offline** (`base-q5_1`) для всех языков приложения |
-| **Translate** — перевод | **Gemini Flash 3.1** по умолчанию (`gemini-3.1-flash-lite`, thinking `minimal`), **Gemini Flash 3.5** (`gemini-3.5-flash-lite`) или **Codex SDK** (`gpt-5.6-luna`, reasoning `low`) | **Gemini Flash 3.1** по умолчанию (`gemini-3.1-flash-lite`, thinking `minimal`), **Gemini Flash 3.5** (`gemini-3.5-flash-lite`), **OpenAI API** (`gpt-5.6-luna`, reasoning `none`) или локальный **OPUS Slavic — Offline** для `Russian ↔ Serbian/Croatian` |
+| **STT** — речь → текст | **Browser STT** (`SpeechRecognition`) по умолчанию или **Groq Whisper Large V3** (`whisper-large-v3`) | **Auto** по умолчанию: подтверждённый или ранее успешно использованный Android offline-пакет → Android STT; явно отсутствующий пакет и интернет → **Groq Whisper Large V3**; без интернета → multilingual **Whisper Offline Live** (`small-q5_1`). Неопределённый ответ системной проверки сначала пробует Android. Вручную доступны как обычный пакетный **Whisper Offline**, так и live-вариант с partial-текстом во время речи |
+| **Translate** — перевод | **Gemini Flash 3.1** по умолчанию (`gemini-3.1-flash-lite`, thinking `minimal`), **Gemini Flash 3.5** (`gemini-3.5-flash-lite`) или **Codex SDK** (`gpt-5.6-luna`, reasoning `low`) | **Gemini Flash 3.1** по умолчанию (`gemini-3.1-flash-lite`, thinking `minimal`), **Gemini Flash 3.5** (`gemini-3.5-flash-lite`), **OpenAI API** (`gpt-5.6-luna`, reasoning `none`), полноточный **OPUS Slavic FP32 — Offline** для `Russian ↔ Serbian/Croatian` или **OPUS Indo-European FP32 — Offline** для `Russian ↔ Romanian/Spanish` |
 | **TTS** — текст → речь | **Browser TTS** по умолчанию или **Gemini 3.1 Flash TTS Preview** (`gemini-3.1-flash-tts-preview`) | Только **Android System TTS** |
 
 Выбор модели перевода действует до перезапуска: при обновлении веб-страницы или новом запуске Android-приложения снова выбирается Gemini Flash 3.1. Остальные пользовательские настройки сохраняются.
 
 На вебе распознавание по умолчанию выполняет встроенный браузерный `SpeechRecognition`. Если в настройках выбран Groq Whisper, WAV-запись отправляется с локального Node-бэкенда в Groq. Gemini TTS возвращается браузеру как WAV. Ключи Gemini и Groq не передаются браузерному JavaScript. В Android облачные ключи встраиваются в тестовый APK, а OpenAI-ключ вводится в приложении и хранится через Android Keystore.
 
-Офлайн-перевод доступен только на arm64-устройствах с Android 9+ и для пар русский ↔ сербский/хорватский. Для сербского можно выбрать латиницу (по умолчанию) или кириллицу. INT8-веса не входят в APK: приложение скачивает отдельный проверяемый пакет размером **45,0 MB** (**66,8 MB** после установки) и сохраняет его между обновлениями APK. Отдельная multilingual-модель Whisper Offline также не входит в APK: `base-q5_1` занимает **59,7 MB**, скачивается из GitHub Releases и работает для всех языков приложения.
+Android-режим `Auto` проверяет установленный системный STT-пакет отдельно для языка нажатой кнопки. Если Samsung/Google не умеет достоверно перечислить локальные пакеты, приложение сначала пробует Android и запоминает успешную пару «сервис + язык»; ошибки 12/13 временно помечают её как недоступную. Фактически выбранный provider сохраняется на весь цикл фразы и показывается в прогрессе как `Auto (Android)`, `Auto (Groq Whisper)` или `Auto (Whisper Live)`. Если сеть недоступна и локальная Whisper-модель ещё не скачана, приложение предлагает установить её в настройках.
+
+Офлайн-перевод доступен только на arm64-устройствах с Android 9+. OPUS Slavic FP32 обслуживает пары русский ↔ сербский/хорватский; для сербского можно выбрать латиницу (по умолчанию) или кириллицу. Его пакет занимает **237,5 MB** при скачивании и **257,6 MB** после установки. OPUS Indo-European FP32 обслуживает русский ↔ румынский/испанский и занимает **246,4 MB** при скачивании и **266,9 MB** после установки. Обе модели доступны отдельными кнопками в настройках, не входят в APK и сохраняются между обновлениями. Старые INT8-каталоги удаляются при первом запуске новой версии. Multilingual Whisper Offline `small-q5_1` также загружается отдельно из GitHub Releases, занимает **190,1 MB** и работает для всех языков приложения; при обновлении старый `base-q5_1` удаляется.
+
+Системный Android SpeechRecognizer сам завершает одну сессию после паузы или достижения внутреннего лимита. Приложение автоматически запускает следующую сессию и объединяет сегменты без повторов, поэтому длинная диктовка больше не обрезается на первом системном результате. На границе сессий возможна короткая пауза; для непрерывной записи можно вручную выбрать Whisper Offline, Whisper Offline Live или Groq Whisper. В обоих локальных Whisper-режимах запись останавливается только вторым нажатием; live-режим показывает изменяемый partial-текст, но в перевод передаёт только отдельный финальный decode полной записи.
 
 ## Быстрый запуск веб-версии
 
@@ -46,7 +50,8 @@ Gemini Flash 3.1 выбран по умолчанию; в настройках �
 - `GEMINI_API_KEY` — Gemini-перевод в вебе/Android и Gemini TTS в вебе;
 - `CODEX_CLI_PATH` — необязательный путь к Codex CLI для веб-провайдера;
 - `OFFLINE_OPUS_MODEL_URL` — необязательная замена URL Android model pack для тестового CDN/локального сервера;
-- `OFFLINE_WHISPER_MODEL_URL` — необязательная замена URL Android Whisper `base-q5_1` model pack;
+- `OFFLINE_OPUS_INE_MODEL_URL` — необязательная замена URL Android OPUS Indo-European FP32 model pack;
+- `OFFLINE_WHISPER_MODEL_URL` — необязательная замена URL Android Whisper `small-q5_1` model pack;
 - `PORT` — порт локального API, по умолчанию `8787`.
 
 Android-сборка читает Gemini/Groq ключи из корневого `.env` и встраивает их в APK. Такой APK предназначен только для личного тестирования: ключи можно извлечь. Перед распространением приложения перенесите облачные вызовы на собственный backend и отзовите встроенные ключи.
@@ -77,7 +82,7 @@ npm run start         # production-сервер на 127.0.0.1:8787
 - `server/translation/` — изолированные провайдеры Codex SDK и Gemini.
 - `server/tts/` — серверный адаптер Gemini TTS для веб-клиента.
 - `android/app/` — активное Jetpack Compose приложение.
-- `android/tools/` — воспроизводимая INT8-конвертация OPUS, квантизация Whisper и сборка JNI runtime.
+- `android/tools/` — воспроизводимая FP32-конвертация OPUS, квантизация Whisper и сборка JNI runtime.
 - `android/optional/whisper/` — исходный Android-модуль `whisper.cpp`, из которого собран подключённый к APK arm64 runtime; веса доставляются отдельно.
 
 Веб и Android используют одну и ту же системную инструкцию с каноническими именами и кодами выбранных языков. Адаптеры передают её как `developer_instructions` в Codex SDK, `instructions` в OpenAI Responses API и `systemInstruction` в Gemini; распознанный текст всегда отправляется отдельно как недоверенный user input. Ответ переводчика проверяется по минимальной JSON-схеме. Замеры этапов доступны как `[timing]` в веб-консоли/Node и через Android-тег `SayItTiming`.

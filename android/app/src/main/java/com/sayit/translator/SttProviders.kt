@@ -4,14 +4,24 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
+import kotlin.coroutines.resume
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 
 interface SttProvider {
@@ -21,10 +31,17 @@ interface SttProvider {
 }
 
 class SystemSttProvider(private val context: Context) : SttProvider {
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
     private var result = CompletableDeferred<String>()
     private var onPartialResult: (String) -> Unit = {}
     private var activeLanguage: AppLanguage? = null
+    private var committedTranscript = ""
+    private var currentPartial = ""
+    private var keepListening = false
+    private var sessionActive = false
+    private val restartRunnable = Runnable { startRecognitionSession() }
+    private val stopFallbackRunnable = Runnable { completeWithAccumulatedTranscript() }
 
     override suspend fun start(
         language: AppLanguage,
@@ -36,59 +53,208 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         result = CompletableDeferred()
         this@SystemSttProvider.onPartialResult = onPartialResult
         activeLanguage = language
-        val speechRecognizer = recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
-            recognizer = it
-            it.setRecognitionListener(listener)
+        committedTranscript = ""
+        currentPartial = ""
+        keepListening = true
+        sessionActive = false
+        removeScheduledCallbacks()
+        startRecognitionSession()
+    }
+
+    internal suspend fun offlineLanguageAvailability(language: AppLanguage): AndroidSttAvailability {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            return AndroidSttAvailability.UNAVAILABLE
         }
-        speechRecognizer.startListening(
-            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.bcp47)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.bcp47)
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3_600_000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3_600_000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_600_000L)
-            },
-        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return AndroidSttAvailability.UNKNOWN
+        }
+        return withTimeoutOrNull(SUPPORT_CHECK_TIMEOUT_MS) {
+            checkRecognitionSupport(language)
+        } ?: AndroidSttAvailability.UNKNOWN
+    }
+
+    internal fun recognitionServiceKey(): String {
+        val configuredService = runCatching {
+            Settings.Secure.getString(context.contentResolver, VOICE_RECOGNITION_SERVICE_SETTING)
+        }.getOrNull()?.takeIf(String::isNotBlank)
+        val voiceDetailsService = runCatching {
+            RecognizerIntent.getVoiceDetailsIntent(context)
+                ?.component
+                ?.flattenToShortString()
+        }.getOrNull()?.takeIf(String::isNotBlank)
+        return configuredService ?: voiceDetailsService ?: DEFAULT_RECOGNITION_SERVICE_KEY
     }
 
     override suspend fun stop(): String {
-        withContext(Dispatchers.Main.immediate) { recognizer?.stopListening() }
+        withContext(Dispatchers.Main.immediate) {
+            keepListening = false
+            removeScheduledCallbacks()
+            if (sessionActive) {
+                recognizer?.stopListening()
+                mainHandler.postDelayed(stopFallbackRunnable, STOP_FALLBACK_MS)
+            } else {
+                completeWithAccumulatedTranscript()
+            }
+        }
         return try {
             withTimeout(20_000) { result.await() }.trim().ifBlank {
                 error("Android speech recognition returned an empty transcript.")
             }
         } finally {
+            removeScheduledCallbacks()
             activeLanguage = null
             onPartialResult = {}
+            committedTranscript = ""
+            currentPartial = ""
+            sessionActive = false
         }
     }
 
     override fun cancel() {
+        keepListening = false
+        sessionActive = false
+        removeScheduledCallbacks()
         recognizer?.cancel()
         if (!result.isCompleted) result.cancel()
         onPartialResult = {}
         activeLanguage = null
+        committedTranscript = ""
+        currentPartial = ""
     }
 
     fun destroy() {
+        removeScheduledCallbacks()
         recognizer?.destroy()
         recognizer = null
+        sessionActive = false
     }
+
+    private fun ensureRecognizer(): SpeechRecognizer =
+        recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
+            recognizer = it
+            it.setRecognitionListener(listener)
+        }
+
+    private fun startRecognitionSession() {
+        if (!keepListening || result.isCompleted) return
+        val language = activeLanguage ?: return
+        runCatching {
+            sessionActive = true
+            ensureRecognizer().startListening(speechRecognitionIntent(language))
+        }.onFailure { throwable ->
+            sessionActive = false
+            if (!result.isCompleted) result.completeExceptionally(throwable)
+        }
+    }
+
+    private fun scheduleNextRecognitionSession(delayMs: Long = SESSION_RESTART_DELAY_MS) {
+        sessionActive = false
+        if (!keepListening || result.isCompleted) return
+        mainHandler.removeCallbacks(restartRunnable)
+        mainHandler.postDelayed(restartRunnable, delayMs)
+    }
+
+    private fun publishPartial(text: String) {
+        currentPartial = text.trim()
+        mergeRecognitionTranscripts(committedTranscript, currentPartial)
+            .takeIf(String::isNotBlank)
+            ?.let(onPartialResult)
+    }
+
+    private fun commitSegment(text: String) {
+        val segment = text.trim().ifBlank { currentPartial }
+        if (segment.isNotBlank()) {
+            committedTranscript = mergeRecognitionTranscripts(committedTranscript, segment)
+            onPartialResult(committedTranscript)
+        }
+        currentPartial = ""
+    }
+
+    private fun completeWithAccumulatedTranscript() {
+        if (result.isCompleted) return
+        sessionActive = false
+        val transcript = mergeRecognitionTranscripts(committedTranscript, currentPartial)
+        result.complete(transcript)
+    }
+
+    private fun removeScheduledCallbacks() {
+        mainHandler.removeCallbacks(restartRunnable)
+        mainHandler.removeCallbacks(stopFallbackRunnable)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    private suspend fun checkRecognitionSupport(
+        language: AppLanguage,
+    ): AndroidSttAvailability =
+        withContext(Dispatchers.Main.immediate) {
+            suspendCancellableCoroutine { continuation ->
+                val speechRecognizer = ensureRecognizer()
+                runCatching {
+                    speechRecognizer.checkRecognitionSupport(
+                        speechRecognitionIntent(language),
+                        ContextCompat.getMainExecutor(context),
+                        object : RecognitionSupportCallback {
+                            override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                                if (continuation.isActive) {
+                                    continuation.resume(
+                                        recognitionSupportAvailability(
+                                            recognitionSupport = recognitionSupport,
+                                            requestedLanguageTag = language.bcp47,
+                                        ),
+                                    )
+                                }
+                            }
+
+                            override fun onError(error: Int) {
+                                if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) destroy()
+                                if (continuation.isActive) {
+                                    continuation.resume(recognitionSupportErrorAvailability(error))
+                                }
+                            }
+                        },
+                    )
+                }.onFailure {
+                    if (continuation.isActive) {
+                        continuation.resume(AndroidSttAvailability.UNKNOWN)
+                    }
+                }
+            }
+        }
 
     private val listener = object : RecognitionListener {
         override fun onResults(results: Bundle?) {
-            val text = bestResult(results)
-            if (text.isNotBlank()) onPartialResult(text)
-            if (!result.isCompleted) result.complete(text)
+            commitSegment(bestResult(results))
+            if (keepListening) {
+                scheduleNextRecognitionSession()
+            } else {
+                completeWithAccumulatedTranscript()
+            }
         }
 
         override fun onError(error: Int) {
+            sessionActive = false
+            if (keepListening && error in RESTARTABLE_SESSION_ERRORS) {
+                scheduleNextRecognitionSession(
+                    if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                        BUSY_RESTART_DELAY_MS
+                    } else {
+                        SESSION_RESTART_DELAY_MS
+                    },
+                )
+                return
+            }
             if (!result.isCompleted) {
+                if (!keepListening && assembledTranscript().isNotBlank()) {
+                    completeWithAccumulatedTranscript()
+                    return
+                }
+                val failure = SystemSttException(
+                    errorCode = error,
+                    message = systemSpeechRecognizerErrorMessage(error, activeLanguage),
+                )
+                if (error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED) destroy()
                 result.completeExceptionally(
-                    IllegalStateException(systemSpeechRecognizerErrorMessage(error, activeLanguage)),
+                    failure,
                 )
             }
         }
@@ -99,7 +265,7 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() = Unit
         override fun onPartialResults(partialResults: Bundle?) {
-            bestResult(partialResults).takeIf(String::isNotBlank)?.let(onPartialResult)
+            bestResult(partialResults).takeIf(String::isNotBlank)?.let(::publishPartial)
         }
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
@@ -109,7 +275,109 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         ?.firstOrNull()
         .orEmpty()
 
+    private fun assembledTranscript(): String =
+        mergeRecognitionTranscripts(committedTranscript, currentPartial)
+
+    private companion object {
+        const val SUPPORT_CHECK_TIMEOUT_MS = 2_500L
+        const val SESSION_RESTART_DELAY_MS = 180L
+        const val BUSY_RESTART_DELAY_MS = 500L
+        const val STOP_FALLBACK_MS = 2_500L
+        const val VOICE_RECOGNITION_SERVICE_SETTING = "voice_recognition_service"
+        const val DEFAULT_RECOGNITION_SERVICE_KEY = "system-default"
+        val RESTARTABLE_SESSION_ERRORS = setOf(
+            SpeechRecognizer.ERROR_NO_MATCH,
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+        )
+    }
+
 }
+
+internal fun mergeRecognitionTranscripts(committed: String, incoming: String): String {
+    val stable = committed.trim()
+    val addition = incoming.trim()
+    if (stable.isBlank()) return addition
+    if (addition.isBlank()) return stable
+
+    val stableWords = stable.split(Regex("\\s+"))
+    val additionWords = addition.split(Regex("\\s+"))
+    if (
+        stableWords.size >= MIN_RECOGNITION_OVERLAP_WORDS &&
+        normalizedRecognitionText(stable) == normalizedRecognitionText(addition)
+    ) {
+        return stable
+    }
+
+    val maximumOverlap = minOf(stableWords.size, additionWords.size)
+    val overlap = (maximumOverlap downTo MIN_RECOGNITION_OVERLAP_WORDS).firstOrNull { size ->
+        val stableSuffix = stableWords.takeLast(size).joinToString(" ")
+        val additionPrefix = additionWords.take(size).joinToString(" ")
+        normalizedRecognitionText(stableSuffix) == normalizedRecognitionText(additionPrefix)
+    } ?: 0
+    return (stableWords + additionWords.drop(overlap)).joinToString(" ").trim()
+}
+
+private fun normalizedRecognitionText(text: String): String = text
+    .lowercase()
+    .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+    .trim()
+
+private const val MIN_RECOGNITION_OVERLAP_WORDS = 2
+
+internal class SystemSttException(
+    val errorCode: Int,
+    message: String,
+) : IllegalStateException(message)
+
+internal fun isMissingAndroidSpeechLanguage(throwable: Throwable): Boolean =
+    (throwable as? SystemSttException)?.errorCode in setOf(
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+    )
+
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+private fun recognitionSupportAvailability(
+    recognitionSupport: RecognitionSupport,
+    requestedLanguageTag: String,
+): AndroidSttAvailability {
+    if (
+        recognitionSupport.installedOnDeviceLanguages.any {
+            languageTagMatches(it, requestedLanguageTag)
+        }
+    ) {
+        return AndroidSttAvailability.AVAILABLE
+    }
+    val explicitlyUnavailable = sequenceOf(
+        recognitionSupport.pendingOnDeviceLanguages,
+        recognitionSupport.supportedOnDeviceLanguages,
+        recognitionSupport.onlineLanguages,
+    ).flatten().any { languageTagMatches(it, requestedLanguageTag) }
+    return if (explicitlyUnavailable) {
+        AndroidSttAvailability.UNAVAILABLE
+    } else {
+        AndroidSttAvailability.UNKNOWN
+    }
+}
+
+private fun recognitionSupportErrorAvailability(error: Int): AndroidSttAvailability =
+    if (
+        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+    ) {
+        AndroidSttAvailability.UNAVAILABLE
+    } else {
+        AndroidSttAvailability.UNKNOWN
+    }
+
+internal fun speechRecognitionIntent(language: AppLanguage): Intent =
+    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.bcp47)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.bcp47)
+        putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+    }
 
 internal fun systemSpeechRecognizerErrorMessage(code: Int, language: AppLanguage?): String {
     val languageName = language?.canonicalName ?: "selected language"
@@ -146,6 +414,10 @@ internal fun systemSpeechRecognizerErrorMessage(code: Int, language: AppLanguage
         SpeechRecognizer.ERROR_SERVER ->
             "Android speech recognition service failed. Restart it or choose another recognition " +
                 "service in Android Settings."
+
+        SpeechRecognizer.ERROR_SERVER_DISCONNECTED ->
+            "Android speech recognition service disconnected (error 11). Say it will reconnect " +
+                "on the next attempt. If it repeats, restart the Google or Samsung speech service."
 
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
             "No speech was detected. Please try again."

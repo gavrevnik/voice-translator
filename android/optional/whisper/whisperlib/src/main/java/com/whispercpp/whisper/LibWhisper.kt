@@ -19,12 +19,23 @@ class WhisperContext private constructor(private var ptr: Long) {
     suspend fun transcribeData(
         data: FloatArray,
         language: String,
+        numThreads: Int = WhisperCpuConfig.preferredThreadCount,
+        initialPrompt: String? = null,
+        finalDecode: Boolean = true,
         printTimestamp: Boolean = false,
     ): String = withContext(scope.coroutineContext) {
         require(ptr != 0L)
-        val numThreads = WhisperCpuConfig.preferredThreadCount
         Log.d(LOG_TAG, "Selecting $numThreads threads")
-        WhisperLib.fullTranscribe(ptr, numThreads, data, language)
+        check(
+            WhisperLib.fullTranscribe(
+                ptr,
+                numThreads,
+                data,
+                language,
+                initialPrompt,
+                finalDecode,
+            ) == 0,
+        ) { "Whisper failed to transcribe audio." }
         val textCount = WhisperLib.getTextSegmentCount(ptr)
         return@withContext buildString {
             for (i in 0 until textCount) {
@@ -143,7 +154,9 @@ private class WhisperLib {
             numThreads: Int,
             audioData: FloatArray,
             language: String,
-        )
+            initialPrompt: String?,
+            finalDecode: Boolean,
+        ): Int
         external fun getTextSegmentCount(contextPtr: Long): Int
         external fun getTextSegment(contextPtr: Long, index: Int): String
         external fun getTextSegmentT0(contextPtr: Long, index: Int): Long

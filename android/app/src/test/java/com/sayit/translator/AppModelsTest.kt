@@ -29,39 +29,192 @@ class AppModelsTest {
         )
         assertEquals("gpt-5.6-luna", state.model.id)
         assertEquals(TranslationOption.GEMINI_3_1, TranslationOption.from(state))
-        assertEquals(4, TranslationOption.entries.size)
+        assertEquals(5, TranslationOption.entries.size)
     }
 
     @Test
     fun `progress labels use compact engine names`() {
+        assertEquals("Auto", recognitionProgressLabel(SttEngine.AUTO, null))
+        assertEquals(
+            "Auto (Whisper Live)",
+            recognitionProgressLabel(SttEngine.AUTO, SttEngine.WHISPER_OFFLINE_LIVE),
+        )
         assertEquals("Android", SttEngine.SYSTEM.progressLabel)
         assertEquals("Groq Whisper", SttEngine.GROQ.progressLabel)
         assertEquals("Whisper Offline", SttEngine.WHISPER_OFFLINE.progressLabel)
-        assertEquals("Slavic Offline", TranslationOption.OFFLINE_OPUS.progressLabel)
+        assertEquals("Whisper Live", SttEngine.WHISPER_OFFLINE_LIVE.progressLabel)
+        assertEquals("Slavic FP32", TranslationOption.OFFLINE_OPUS_SLAVIC.progressLabel)
+        assertEquals("INE FP32", TranslationOption.OFFLINE_OPUS_INDO_EUROPEAN.progressLabel)
         assertEquals("Android", PLAYBACK_PROGRESS_LABEL)
     }
 
     @Test
-    fun `system speech recognition remains the default`() {
-        assertEquals(SttEngine.SYSTEM, TranslatorUiState().sttEngine)
+    fun `automatic speech recognition is the default`() {
+        assertEquals(SttEngine.AUTO, TranslatorUiState().sttEngine)
         assertEquals("whisper-large-v3", GROQ_STT_MODEL)
-        assertEquals("base-q5_1", WHISPER_OFFLINE_MODEL)
+        assertEquals("small-q5_1", WHISPER_OFFLINE_MODEL)
         assertEquals(
-            setOf(SttEngine.SYSTEM, SttEngine.GROQ, SttEngine.WHISPER_OFFLINE),
+            setOf(
+                SttEngine.AUTO,
+                SttEngine.SYSTEM,
+                SttEngine.GROQ,
+                SttEngine.WHISPER_OFFLINE,
+                SttEngine.WHISPER_OFFLINE_LIVE,
+            ),
             SttEngine.entries.toSet(),
         )
+    }
+
+    @Test
+    fun `auto STT prefers Android for available or unknown support`() {
+        assertEquals(
+            SttEngine.SYSTEM,
+            chooseAutoSttEngine(
+                androidAvailability = AndroidSttAvailability.AVAILABLE,
+                internetAvailable = true,
+                groqConfigured = true,
+            ),
+        )
+        assertEquals(
+            SttEngine.SYSTEM,
+            chooseAutoSttEngine(
+                androidAvailability = AndroidSttAvailability.UNKNOWN,
+                internetAvailable = false,
+                groqConfigured = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `auto STT falls back only when Android is explicitly unavailable`() {
+        assertEquals(
+            SttEngine.GROQ,
+            chooseAutoSttEngine(
+                androidAvailability = AndroidSttAvailability.UNAVAILABLE,
+                internetAvailable = true,
+                groqConfigured = true,
+            ),
+        )
+        assertEquals(
+            SttEngine.WHISPER_OFFLINE_LIVE,
+            chooseAutoSttEngine(
+                androidAvailability = AndroidSttAvailability.UNAVAILABLE,
+                internetAvailable = false,
+                groqConfigured = true,
+            ),
+        )
+        assertEquals(
+            SttEngine.WHISPER_OFFLINE_LIVE,
+            chooseAutoSttEngine(
+                androidAvailability = AndroidSttAvailability.UNAVAILABLE,
+                internetAvailable = true,
+                groqConfigured = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `Android STT capability records round trip`() {
+        val record = AndroidSttCapabilityRecord(
+            availability = AndroidSttAvailability.AVAILABLE,
+            recordedAtMs = 1234L,
+        )
+
+        assertEquals(record, AndroidSttCapabilityRecord.parse(record.serialize()))
+        assertEquals(null, AndroidSttCapabilityRecord.parse("invalid"))
+    }
+
+    @Test
+    fun `Android STT package matching accepts regional language tags`() {
+        assertTrue(languageTagMatches("hr", "hr-HR"))
+        assertTrue(languageTagMatches("sr-Latn-RS", "sr-RS"))
+        assertTrue(!languageTagMatches("ru-RU", "hr-HR"))
     }
 
     @Test
     fun `system speech errors explain unsupported and missing offline languages`() {
         val unsupported = systemSpeechRecognizerErrorMessage(12, AppLanguage.SERBIAN)
         val unavailable = systemSpeechRecognizerErrorMessage(13, AppLanguage.SERBIAN)
+        val disconnected = systemSpeechRecognizerErrorMessage(11, AppLanguage.RUSSIAN)
 
         assertTrue(unsupported.contains("does not support Serbian"))
         assertTrue(unsupported.contains("error 12"))
         assertTrue(unsupported.contains("offline Serbian speech pack"))
         assertTrue(unavailable.contains("not downloaded"))
         assertTrue(unavailable.contains("error 13"))
+        assertTrue(disconnected.contains("disconnected"))
+        assertTrue(disconnected.contains("error 11"))
+        assertTrue(disconnected.contains("reconnect"))
+        assertTrue(isMissingAndroidSpeechLanguage(SystemSttException(12, unsupported)))
+        assertTrue(isMissingAndroidSpeechLanguage(SystemSttException(13, unavailable)))
+        assertTrue(!isMissingAndroidSpeechLanguage(SystemSttException(11, disconnected)))
+    }
+
+    @Test
+    fun `Whisper removes an exact duplicated phrase without changing normal repetition`() {
+        assertEquals(
+            "Где находится вокзал?",
+            deduplicateWhisperTranscript("Где находится вокзал? Где находится вокзал?"),
+        )
+        assertEquals("да да", deduplicateWhisperTranscript("да да"))
+        assertEquals(
+            "Мне нужен билет на завтра",
+            deduplicateWhisperTranscript("Мне нужен билет на завтра"),
+        )
+    }
+
+    @Test
+    fun `Whisper live config fixes language and uses bounded partial cadence`() {
+        val config = WhisperTranscriptionConfig(
+            model = WHISPER_OFFLINE_MODEL,
+            threads = 4,
+            language = AppLanguage.RUSSIAN.whisperCode,
+        )
+
+        assertEquals(1_000L, config.partialUpdateIntervalMs)
+        assertEquals(8, config.slidingWindowSeconds)
+        assertEquals(128_000, config.slidingWindowSamples)
+        assertEquals("small-q5_1", config.model)
+        assertEquals("ru", config.language)
+    }
+
+    @Test
+    fun `Whisper live partials merge overlapping rolling windows`() {
+        val assembler = WhisperPartialTranscriptAssembler()
+
+        assertEquals("hello", assembler.update("hello"))
+        assertEquals("hello brave", assembler.update("hello brave"))
+        assertEquals(
+            "hello brave world today",
+            assembler.update("hello brave world today"),
+        )
+        assertEquals(
+            "hello brave world today and tomorrow",
+            assembler.update("world today and tomorrow"),
+        )
+        assertEquals(
+            "hello brave world today and tomorrow",
+            assembler.contextPrompt(),
+        )
+    }
+
+    @Test
+    fun `Android speech sessions merge overlapping text without duplicating phrases`() {
+        assertEquals(
+            "Мне нужен билет на завтра утром",
+            mergeRecognitionTranscripts(
+                "Мне нужен билет на завтра",
+                "на завтра утром",
+            ),
+        )
+        assertEquals(
+            "Где находится вокзал?",
+            mergeRecognitionTranscripts(
+                "Где находится вокзал?",
+                "где находится вокзал",
+            ),
+        )
+        assertEquals("да да", mergeRecognitionTranscripts("да", "да"))
     }
 
     @Test
@@ -99,13 +252,18 @@ class AppModelsTest {
     }
 
     @Test
-    fun `offline OPUS is exposed for Russian with Serbian or Croatian`() {
-        assertTrue(isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.SERBIAN))
-        assertTrue(isOfflineOpusDirection(AppLanguage.SERBIAN, AppLanguage.RUSSIAN))
-        assertTrue(isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.CROATIAN))
-        assertTrue(isOfflineOpusDirection(AppLanguage.CROATIAN, AppLanguage.RUSSIAN))
-        assertTrue(!isOfflineOpusDirection(AppLanguage.SERBIAN, AppLanguage.CROATIAN))
-        assertTrue(!isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.ENGLISH))
+    fun `offline OPUS models expose only compatible app language pairs`() {
+        assertTrue(isOfflineSlavicDirection(AppLanguage.RUSSIAN, AppLanguage.SERBIAN))
+        assertTrue(isOfflineSlavicDirection(AppLanguage.SERBIAN, AppLanguage.RUSSIAN))
+        assertTrue(isOfflineSlavicDirection(AppLanguage.RUSSIAN, AppLanguage.CROATIAN))
+        assertTrue(isOfflineSlavicDirection(AppLanguage.CROATIAN, AppLanguage.RUSSIAN))
+        assertTrue(!isOfflineSlavicDirection(AppLanguage.SERBIAN, AppLanguage.CROATIAN))
+        assertTrue(isOfflineIndoEuropeanDirection(AppLanguage.RUSSIAN, AppLanguage.ROMANIAN))
+        assertTrue(isOfflineIndoEuropeanDirection(AppLanguage.ROMANIAN, AppLanguage.RUSSIAN))
+        assertTrue(isOfflineIndoEuropeanDirection(AppLanguage.RUSSIAN, AppLanguage.SPANISH))
+        assertTrue(isOfflineIndoEuropeanDirection(AppLanguage.SPANISH, AppLanguage.RUSSIAN))
+        assertTrue(!isOfflineIndoEuropeanDirection(AppLanguage.SPANISH, AppLanguage.ROMANIAN))
+        assertTrue(!isOfflineIndoEuropeanDirection(AppLanguage.SPANISH, AppLanguage.ENGLISH))
     }
 
     @Test
@@ -113,6 +271,7 @@ class AppModelsTest {
         assertEquals(
             ">>srp_Latn<< Где находится вокзал?",
             offlineOpusInput(
+                OfflineOpusFamily.SLAVIC,
                 AppLanguage.SERBIAN,
                 SerbianScript.LATIN,
                 "Где находится вокзал?",
@@ -121,6 +280,7 @@ class AppModelsTest {
         assertEquals(
             ">>srp_Cyrl<< Анна купила 2 билета.",
             offlineOpusInput(
+                OfflineOpusFamily.SLAVIC,
                 AppLanguage.SERBIAN,
                 SerbianScript.CYRILLIC,
                 "Анна купила 2 билета.",
@@ -128,14 +288,47 @@ class AppModelsTest {
         )
         assertEquals(
             ">>rus<< Treba mi kafa.",
-            offlineOpusInput(AppLanguage.RUSSIAN, SerbianScript.LATIN, "Treba mi kafa."),
+            offlineOpusInput(
+                OfflineOpusFamily.SLAVIC,
+                AppLanguage.RUSSIAN,
+                SerbianScript.LATIN,
+                "Treba mi kafa.",
+            ),
         )
         assertEquals(
             ">>hrv<< Где находится вокзал?",
             offlineOpusInput(
+                OfflineOpusFamily.SLAVIC,
                 AppLanguage.CROATIAN,
                 SerbianScript.LATIN,
                 "Где находится вокзал?",
+            ),
+        )
+        assertEquals(
+            ">>ron<< Unde este gara?",
+            offlineOpusInput(
+                OfflineOpusFamily.INDO_EUROPEAN,
+                AppLanguage.ROMANIAN,
+                SerbianScript.LATIN,
+                "Unde este gara?",
+            ),
+        )
+        assertEquals(
+            ">>spa<< ¿Dónde está la estación?",
+            offlineOpusInput(
+                OfflineOpusFamily.INDO_EUROPEAN,
+                AppLanguage.SPANISH,
+                SerbianScript.LATIN,
+                "¿Dónde está la estación?",
+            ),
+        )
+        assertEquals(
+            ">>rus<< Unde este gara?",
+            offlineOpusInput(
+                OfflineOpusFamily.INDO_EUROPEAN,
+                AppLanguage.RUSSIAN,
+                SerbianScript.LATIN,
+                "Unde este gara?",
             ),
         )
     }
@@ -188,6 +381,7 @@ class AppModelsTest {
         supportedScripts = setOf("srp_Latn", "srp_Cyrl", "hrv"),
         runtimeType = "test",
         runtimeVersion = "1",
+        modelFile = "model.bin",
         requiredFiles = setOf("model.bin"),
         files = listOf(OfflineModelFileSpec("model.bin", 3, TEST_SHA256)),
     )

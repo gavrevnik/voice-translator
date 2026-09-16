@@ -36,6 +36,7 @@ data class OfflineModelManifest(
     val supportedScripts: Set<String>,
     val runtimeType: String,
     val runtimeVersion: String,
+    val modelFile: String,
     val requiredFiles: Set<String>,
     val files: List<OfflineModelFileSpec>,
 ) {
@@ -46,8 +47,12 @@ data class OfflineModelManifest(
     val installedSizeLabel: String get() = decimalMegabytes(installedSize)
 
     companion object {
-        fun load(context: Context): OfflineModelManifest {
-            val raw = context.assets.open("offline_models.json").bufferedReader().use { it.readText() }
+        fun load(
+            context: Context,
+            assetName: String,
+            overrideDownloadUrl: String = "",
+        ): OfflineModelManifest {
+            val raw = context.assets.open(assetName).bufferedReader().use { it.readText() }
             val json = JSONObject(raw)
             val fileArray = json.getJSONArray("files")
             val files = buildList {
@@ -66,7 +71,7 @@ data class OfflineModelManifest(
                 id = json.getString("id"),
                 version = json.getString("version"),
                 displayName = json.getString("displayName"),
-                downloadUrl = BuildConfig.OFFLINE_OPUS_MODEL_URL.trim()
+                downloadUrl = overrideDownloadUrl.trim()
                     .ifBlank { json.getString("downloadUrl") },
                 sha256 = json.getString("sha256"),
                 downloadSize = json.getLong("downloadSize"),
@@ -75,6 +80,7 @@ data class OfflineModelManifest(
                 supportedScripts = json.stringSet("supportedScripts"),
                 runtimeType = json.getString("runtimeType"),
                 runtimeVersion = json.getString("runtimeVersion"),
+                modelFile = json.getString("modelFile"),
                 requiredFiles = json.stringSet("requiredFiles"),
                 files = files,
             )
@@ -145,6 +151,9 @@ internal object OfflineModelIntegrity {
 
 class OfflineModelManager(
     context: Context,
+    assetName: String = "offline_models.json",
+    overrideDownloadUrl: String = "",
+    retiredModelIds: Set<String> = emptySet(),
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)
@@ -152,11 +161,23 @@ class OfflineModelManager(
         .build(),
 ) {
     private val appContext = context.applicationContext
-    val manifest: OfflineModelManifest = OfflineModelManifest.load(appContext)
+    val manifest: OfflineModelManifest = OfflineModelManifest.load(
+        appContext,
+        assetName,
+        overrideDownloadUrl,
+    )
     private val modelRoot = File(appContext.filesDir, "offline-models/${manifest.id}")
     private val installDirectory = File(modelRoot, manifest.version)
     private val _status = MutableStateFlow(inspectInstallation())
     val status: StateFlow<OfflineModelStatus> = _status.asStateFlow()
+
+    init {
+        retiredModelIds
+            .filter { it != manifest.id && it.matches(Regex("[A-Za-z0-9._-]+")) }
+            .forEach { retiredId ->
+                File(appContext.filesDir, "offline-models/$retiredId").deleteRecursively()
+            }
+    }
 
     fun supports(source: AppLanguage, target: AppLanguage): Boolean =
         manifest.supports(source, target)
@@ -242,7 +263,7 @@ class OfflineModelManager(
             error(validationError)
         }
         return OfflineModelFiles(
-            model = File(installDirectory, "model.intgemm8.bin"),
+            model = File(installDirectory, manifest.modelFile),
             sourceVocab = File(installDirectory, "source.spm"),
             targetVocab = File(installDirectory, "target.spm"),
             shortlist = File(installDirectory, "lex.s2t.bin"),

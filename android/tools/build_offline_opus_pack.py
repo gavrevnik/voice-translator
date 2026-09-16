@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build the quantized OPUS Slavic model pack consumed by the Android app.
+"""Build a full-precision OPUS model pack consumed by the Android app.
 
 The script intentionally uses only the Python standard library. It downloads
 the pinned OPUS archive when needed, aligns its SentencePiece model IDs with
-the Marian vocabulary, creates an INT8 model and lexical shortlist, and writes
+the Marian vocabulary, creates an FP32 model and lexical shortlist, and writes
 a deterministic ZIP plus its delivery metadata.
 """
 
@@ -26,16 +26,26 @@ SOURCE_URL = (
     "opus-2020-07-27.zip"
 )
 SOURCE_SHA256 = "b6cf76509de6ee34789ec2d169f4c5f85bd25170deb2ab75f2896c0f1b347a17"
-MODEL_ID = "opus-mt-sla-sla-int8"
+SOURCE_ARCHIVE_NAME = "opus-2020-07-27.zip"
+SOURCE_DISPLAY_NAME = "Helsinki-NLP/opus-mt-sla-sla (opus-2020-07-27)"
+MODEL_ID = "opus-mt-sla-sla-fp32"
 MODEL_VERSION = "1"
 RUNTIME_VERSION = "translate-kit-android 0.1.0"
 DEFAULT_DOWNLOAD_URL = (
     "https://github.com/gavrevnik/voice-translator/releases/download/"
-    "offline-opus-sla-v1/offline-opus-sla-int8-v1.zip"
+    "offline-opus-sla-fp32-v1/offline-opus-sla-fp32-v1.zip"
 )
 ORIGINAL_MODEL = "opus.spm32k-spm32k.transformer.model1.npz.best-perplexity.npz"
 ORIGINAL_VOCAB = "opus.spm32k-spm32k.vocab.yml"
-PACK_NAME = "offline-opus-sla-int8-v1.zip"
+MODEL_FILE = "model.float32.bin"
+GEMM_TYPE = "float32"
+PRECISION_NAME = "FP32"
+PACK_NAME = "offline-opus-sla-fp32-v1.zip"
+DISPLAY_NAME = "OPUS Slavic FP32 — Offline"
+LICENSE_OUTPUT_NAME = "LICENSE.opus-mt-sla-sla"
+SUPPORTED_DIRECTIONS = ["ru-sr", "sr-ru", "ru-hr", "hr-ru"]
+SUPPORTED_SCRIPTS = ["srp_Latn", "srp_Cyrl", "hrv"]
+DEFAULT_SERBIAN_SCRIPT = "srp_Latn"
 SHORTLIST_FREQUENT_TOKENS = 16_000
 
 
@@ -161,9 +171,61 @@ def load_marian_vocab(path: Path) -> list[str]:
     indexed = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         key, raw_index = line.rsplit(": ", 1)
-        token = json.loads(key) if key.startswith('"') else key
+        token = parse_yaml_scalar(key)
         indexed[int(raw_index)] = token
     return [indexed[index] for index in range(len(indexed))]
+
+
+def parse_yaml_scalar(raw: str) -> str:
+    if raw.startswith("'") and raw.endswith("'"):
+        return raw[1:-1].replace("''", "'")
+    if not (raw.startswith('"') and raw.endswith('"')):
+        return raw
+
+    value = raw[1:-1]
+    escapes = {
+        "0": "\0",
+        "a": "\a",
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "v": "\v",
+        "f": "\f",
+        "r": "\r",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    decoded = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            decoded.append(value[index])
+            index += 1
+            continue
+        index += 1
+        if index >= len(value):
+            raise ValueError(f"invalid trailing escape in vocabulary token: {raw}")
+        escape = value[index]
+        index += 1
+        if escape in escapes:
+            decoded.append(escapes[escape])
+        elif escape in {"x", "u", "U"}:
+            width = {"x": 2, "u": 4, "U": 8}[escape]
+            codepoint = value[index:index + width]
+            if len(codepoint) != width:
+                raise ValueError(f"invalid Unicode escape in vocabulary token: {raw}")
+            decoded.append(chr(int(codepoint, 16)))
+            index += width
+        else:
+            raise ValueError(f"unsupported YAML escape \\{escape} in vocabulary token")
+    return "".join(decoded)
 
 
 def build_compatible_sentencepiece(
@@ -197,7 +259,7 @@ def build_compatible_sentencepiece(
 
 
 def download_source(work_dir: Path) -> Path:
-    archive = work_dir / "opus-2020-07-27.zip"
+    archive = work_dir / SOURCE_ARCHIVE_NAME
     if not archive.exists() or sha256(archive) != SOURCE_SHA256:
         print(f"Downloading {SOURCE_URL}")
         with urllib.request.urlopen(SOURCE_URL) as response, archive.open("wb") as output:
@@ -238,10 +300,10 @@ skip-cost: true
 cpu-threads: 0
 quiet: true
 quiet-translation: true
-gemm-precision: int8
+gemm-precision: {GEMM_TYPE}
 alignment: soft
 ssplit-mode: paragraph
-""",
+""".format(GEMM_TYPE=GEMM_TYPE),
         encoding="utf-8",
     )
 
@@ -280,7 +342,7 @@ def main() -> None:
         target_spm,
     )
 
-    model = pack_dir / "model.intgemm8.bin"
+    model = pack_dir / MODEL_FILE
     subprocess.run(
         [
             str(args.marian_conv),
@@ -289,7 +351,7 @@ def main() -> None:
             "--to",
             str(model),
             "--gemm-type",
-            "intgemm8",
+            GEMM_TYPE,
         ],
         check=True,
     )
@@ -319,10 +381,10 @@ def main() -> None:
 
     config = pack_dir / "config.yml"
     write_config(config)
-    shutil.copy2(source_dir / "LICENSE", pack_dir / "LICENSE.opus-mt-sla-sla")
+    shutil.copy2(source_dir / "LICENSE", pack_dir / LICENSE_OUTPUT_NAME)
 
     required_names = [
-        "model.intgemm8.bin",
+        MODEL_FILE,
         "source.spm",
         "target.spm",
         "lex.s2t.bin",
@@ -339,18 +401,20 @@ def main() -> None:
     pack_manifest = {
         "id": MODEL_ID,
         "version": MODEL_VERSION,
-        "source": "Helsinki-NLP/opus-mt-sla-sla (opus-2020-07-27)",
+        "source": SOURCE_DISPLAY_NAME,
         "sourceUrl": SOURCE_URL,
         "sourceSha256": SOURCE_SHA256,
         "license": "Apache-2.0",
-        "quantization": "INT8 / Marian intgemm8",
+        "precision": PRECISION_NAME,
         "runtimeType": "Bergamot/Marian via translate-kit",
         "runtimeVersion": RUNTIME_VERSION,
-        "supportedDirections": ["ru-sr", "sr-ru", "ru-hr", "hr-ru"],
-        "supportedScripts": ["srp_Latn", "srp_Cyrl", "hrv"],
-        "defaultSerbianScript": "srp_Latn",
+        "modelFile": MODEL_FILE,
+        "supportedDirections": SUPPORTED_DIRECTIONS,
+        "supportedScripts": SUPPORTED_SCRIPTS,
         "files": file_metadata,
     }
+    if DEFAULT_SERBIAN_SCRIPT:
+        pack_manifest["defaultSerbianScript"] = DEFAULT_SERBIAN_SCRIPT
     (pack_dir / "manifest.json").write_text(
         json.dumps(pack_manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -361,7 +425,7 @@ def main() -> None:
     installed_size = sum(path.stat().st_size for path in pack_dir.iterdir())
     delivery_manifest = {
         **pack_manifest,
-        "displayName": "OPUS Slavic — Offline",
+        "displayName": DISPLAY_NAME,
         "downloadUrl": args.download_url,
         "sha256": sha256(output_zip),
         "downloadSize": output_zip.stat().st_size,
