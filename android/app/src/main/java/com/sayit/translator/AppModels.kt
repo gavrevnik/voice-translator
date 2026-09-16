@@ -10,6 +10,7 @@ enum class AppLanguage(
     val stopLabel: String,
 ) {
     SERBIAN("sr", "Serbian", "Српски", "sr-RS", "sr", "Говори", "Заустави"),
+    CROATIAN("hr", "Croatian", "Hrvatski", "hr-HR", "hr", "Govori", "Zaustavi"),
     ENGLISH("en", "English", "English", "en-US", "en", "Speak", "Stop"),
     ROMANIAN("ro", "Romanian", "Română", "ro-RO", "ro", "Vorbește", "Oprește"),
     RUSSIAN("ru", "Russian", "Русский", "ru-RU", "ru", "Говорить", "Стоп"),
@@ -38,34 +39,38 @@ enum class SerbianScript(val label: String, val targetToken: String) {
     CYRILLIC("Serbian Cyrillic", ">>srp_Cyrl<<"),
 }
 
-enum class TtsEngine(val label: String) {
-    GEMINI("Gemini Flash"),
-    SYSTEM("Android TTS"),
-}
-
-enum class SttEngine(val label: String) {
-    SYSTEM("Android Speech"),
-    GROQ("Groq Whisper"),
+enum class SttEngine(val label: String, val progressLabel: String) {
+    SYSTEM("Android Speech", "Android"),
+    GROQ("Groq Whisper", "Groq Whisper"),
+    WHISPER_OFFLINE("Whisper Offline", "Whisper Offline"),
 }
 
 enum class TranslationOption(
     val label: String,
+    val progressLabel: String,
     val engine: TranslationEngine,
     val openAiModel: TranslationModel? = null,
     val geminiModel: GeminiTranslationModel? = null,
 ) {
-    OPENAI_LUNA("GPT-5.6 Luna", TranslationEngine.OPENAI, openAiModel = TranslationModel.LUNA),
+    OPENAI_LUNA(
+        "GPT-5.6 Luna",
+        "GPT Luna",
+        TranslationEngine.OPENAI,
+        openAiModel = TranslationModel.LUNA,
+    ),
     GEMINI_3_1(
         "Gemini Flash 3.1",
+        "Gemini 3.1",
         TranslationEngine.GEMINI,
         geminiModel = GeminiTranslationModel.FLASH_3_1_LITE,
     ),
     GEMINI_3_5(
         "Gemini Flash 3.5",
+        "Gemini 3.5",
         TranslationEngine.GEMINI,
         geminiModel = GeminiTranslationModel.FLASH_3_5_LITE,
     ),
-    OFFLINE_OPUS("OPUS Slavic — Offline", TranslationEngine.OFFLINE_OPUS),
+    OFFLINE_OPUS("OPUS Slavic — Offline", "Slavic Offline", TranslationEngine.OFFLINE_OPUS),
     ;
 
     companion object {
@@ -98,12 +103,14 @@ data class TranslatorUiState(
     val model: TranslationModel = TranslationModel.LUNA,
     val geminiModel: GeminiTranslationModel = GeminiTranslationModel.FLASH_3_1_LITE,
     val translationEngine: TranslationEngine = TranslationEngine.GEMINI,
-    val ttsEngine: TtsEngine = TtsEngine.SYSTEM,
     val sttEngine: SttEngine = SttEngine.SYSTEM,
     val serbianScript: SerbianScript = SerbianScript.LATIN,
     val offlineModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
     val offlineModelDownloadSizeLabel: String = "",
     val offlineRuntimeAvailable: Boolean = true,
+    val whisperModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
+    val whisperModelDownloadSizeLabel: String = "",
+    val whisperRuntimeAvailable: Boolean = true,
     val status: VoiceStatus = VoiceStatus.READY,
     val activeSide: LanguageSide? = null,
     val textA: String = "",
@@ -114,8 +121,12 @@ data class TranslatorUiState(
     val hasOpenAiApiKey: Boolean = false,
 )
 
-const val GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 const val GROQ_STT_MODEL = "whisper-large-v3"
+const val WHISPER_OFFLINE_MODEL = "base-q5_1"
+const val PLAYBACK_PROGRESS_LABEL = "Android"
 
 fun isOfflineOpusDirection(languageA: AppLanguage, languageB: AppLanguage): Boolean =
-    setOf(languageA, languageB) == setOf(AppLanguage.RUSSIAN, AppLanguage.SERBIAN)
+    (languageA == AppLanguage.RUSSIAN &&
+        languageB in setOf(AppLanguage.SERBIAN, AppLanguage.CROATIAN)) ||
+        (languageB == AppLanguage.RUSSIAN &&
+            languageA in setOf(AppLanguage.SERBIAN, AppLanguage.CROATIAN))

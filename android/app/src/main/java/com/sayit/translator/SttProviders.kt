@@ -24,6 +24,7 @@ class SystemSttProvider(private val context: Context) : SttProvider {
     private var recognizer: SpeechRecognizer? = null
     private var result = CompletableDeferred<String>()
     private var onPartialResult: (String) -> Unit = {}
+    private var activeLanguage: AppLanguage? = null
 
     override suspend fun start(
         language: AppLanguage,
@@ -34,6 +35,7 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         }
         result = CompletableDeferred()
         this@SystemSttProvider.onPartialResult = onPartialResult
+        activeLanguage = language
         val speechRecognizer = recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
             recognizer = it
             it.setRecognitionListener(listener)
@@ -54,8 +56,13 @@ class SystemSttProvider(private val context: Context) : SttProvider {
 
     override suspend fun stop(): String {
         withContext(Dispatchers.Main.immediate) { recognizer?.stopListening() }
-        return withTimeout(20_000) { result.await() }.trim().ifBlank {
-            error("System SpeechRecognizer returned an empty transcript.")
+        return try {
+            withTimeout(20_000) { result.await() }.trim().ifBlank {
+                error("Android speech recognition returned an empty transcript.")
+            }
+        } finally {
+            activeLanguage = null
+            onPartialResult = {}
         }
     }
 
@@ -63,6 +70,7 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         recognizer?.cancel()
         if (!result.isCompleted) result.cancel()
         onPartialResult = {}
+        activeLanguage = null
     }
 
     fun destroy() {
@@ -80,7 +88,7 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         override fun onError(error: Int) {
             if (!result.isCompleted) {
                 result.completeExceptionally(
-                    IllegalStateException("System SpeechRecognizer error: ${errorLabel(error)}"),
+                    IllegalStateException(systemSpeechRecognizerErrorMessage(error, activeLanguage)),
                 )
             }
         }
@@ -101,17 +109,48 @@ class SystemSttProvider(private val context: Context) : SttProvider {
         ?.firstOrNull()
         .orEmpty()
 
-    private fun errorLabel(code: Int): String = when (code) {
-        SpeechRecognizer.ERROR_AUDIO -> "audio"
-        SpeechRecognizer.ERROR_CLIENT -> "client"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "microphone permission"
-        SpeechRecognizer.ERROR_NETWORK -> "network"
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network timeout"
-        SpeechRecognizer.ERROR_NO_MATCH -> "no speech match"
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "recognizer busy"
-        SpeechRecognizer.ERROR_SERVER -> "service"
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "speech timeout"
-        else -> "code $code"
+}
+
+internal fun systemSpeechRecognizerErrorMessage(code: Int, language: AppLanguage?): String {
+    val languageName = language?.canonicalName ?: "selected language"
+    return when (code) {
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ->
+            "The selected Android speech recognition service does not support $languageName " +
+                "(error 12). Install or enable an offline $languageName speech pack in Android " +
+                "Settings, or use Groq Whisper when online."
+
+        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+            "$languageName speech recognition is supported, but its offline speech pack is not " +
+                "downloaded (error 13). Install it in Android voice input settings and try again."
+
+        SpeechRecognizer.ERROR_AUDIO ->
+            "Android speech recognition could not read microphone audio."
+
+        SpeechRecognizer.ERROR_CLIENT ->
+            "Android speech recognition could not start. Restart Say it and try again."
+
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+            "Microphone permission is required for speech recognition."
+
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+        -> "Offline Android speech recognition is unavailable for $languageName. Install its " +
+            "offline speech pack, or use Groq Whisper when online."
+
+        SpeechRecognizer.ERROR_NO_MATCH ->
+            "No $languageName speech was recognized. Please try again."
+
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
+            "Android speech recognition is busy. Wait a moment and try again."
+
+        SpeechRecognizer.ERROR_SERVER ->
+            "Android speech recognition service failed. Restart it or choose another recognition " +
+                "service in Android Settings."
+
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+            "No speech was detected. Please try again."
+
+        else -> "Android speech recognition failed for $languageName (error $code)."
     }
 }
 

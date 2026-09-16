@@ -42,7 +42,6 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -121,7 +120,8 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             onSerbianScript = viewModel::setSerbianScript,
             onDownloadOfflineModel = viewModel::downloadOfflineModel,
             onDeleteOfflineModel = viewModel::deleteOfflineModel,
-            onTtsEngine = viewModel::setTtsEngine,
+            onDownloadWhisperModel = viewModel::downloadWhisperModel,
+            onDeleteWhisperModel = viewModel::deleteWhisperModel,
             onSttEngine = viewModel::setSttEngine,
             onBack = { settingsOpen = false },
         )
@@ -155,7 +155,7 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             LanguagePicker(
@@ -167,23 +167,6 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
                 enabled = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR,
                 onSelected = { viewModel.setLanguage(LanguageSide.A, it) },
             )
-            Surface(
-                onClick = viewModel::swapLanguages,
-                enabled = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR,
-                modifier = Modifier.size(48.dp),
-                shape = CircleShape,
-                color = Color.White.copy(alpha = 0.72f),
-                border = BorderStroke(1.dp, SayItInk.copy(alpha = 0.14f)),
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        Icons.Filled.SwapHoriz,
-                        contentDescription = "Swap languages",
-                        tint = SayItInk,
-                        modifier = Modifier.size(21.dp),
-                    )
-                }
-            }
             LanguagePicker(
                 modifier = Modifier.weight(1f),
                 selected = state.languageB,
@@ -193,11 +176,21 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
                 enabled = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR,
                 onSelected = { viewModel.setLanguage(LanguageSide.B, it) },
             )
+            IconButton(
+                onClick = { settingsOpen = true },
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = "Settings",
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             SpeechButton(
                 modifier = Modifier.weight(1f),
@@ -217,19 +210,15 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
                 activeSide = state.activeSide,
                 onMicrophone = { onMicrophone(LanguageSide.B) },
             )
-            IconButton(
-                onClick = { settingsOpen = true },
-                modifier = Modifier.size(64.dp),
-            ) {
-                Icon(Icons.Filled.Settings, contentDescription = "Settings")
-            }
         }
 
         TurnProgress(
             status = state.status,
             hasResult = state.resultSide != null,
             elapsedSeconds = state.elapsedSeconds,
-            translationLabel = TranslationOption.from(state).label,
+            recognitionLabel = state.sttEngine.progressLabel,
+            translationLabel = TranslationOption.from(state).progressLabel,
+            playbackLabel = PLAYBACK_PROGRESS_LABEL,
             onStopPlayback = viewModel::stopPlayback,
         )
 
@@ -290,7 +279,9 @@ private fun TurnProgress(
     status: VoiceStatus,
     hasResult: Boolean,
     elapsedSeconds: Int,
+    recognitionLabel: String,
     translationLabel: String,
+    playbackLabel: String,
     onStopPlayback: () -> Unit,
 ) {
     val activeIndex = when (status) {
@@ -300,7 +291,7 @@ private fun TurnProgress(
         VoiceStatus.READY -> if (hasResult) 3 else -1
         VoiceStatus.ERROR -> -1
     }
-    val labels = listOf("Speech", translationLabel, "Playback")
+    val labels = listOf(recognitionLabel, translationLabel, playbackLabel)
 
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -318,7 +309,7 @@ private fun TurnProgress(
             ) {
                 labels.forEachIndexed { index, label ->
                     Row(
-                        modifier = Modifier.weight(if (index == 1) 1.6f else 1f),
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center,
                     ) {
@@ -326,7 +317,7 @@ private fun TurnProgress(
                             completed = activeIndex == 3 || index < activeIndex,
                             active = index == activeIndex,
                         )
-                        Spacer(Modifier.width(5.dp))
+                        Spacer(Modifier.width(3.dp))
                         Text(
                             text = label,
                             color = if (activeIndex == 3 || index <= activeIndex) {
@@ -334,7 +325,7 @@ private fun TurnProgress(
                             } else {
                                 SayItMuted
                             },
-                            fontSize = if (index == 1) 9.sp else 10.sp,
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -427,8 +418,8 @@ private fun SpeechButton(
         enabled = !disabled,
         modifier = modifier
             .fillMaxWidth()
-            .height(64.dp),
-        shape = RoundedCornerShape(18.dp),
+            .height(56.dp),
+        shape = RoundedCornerShape(16.dp),
         contentPadding = PaddingValues(horizontal = 10.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = color,
@@ -464,48 +455,54 @@ private fun LanguagePicker(
     onSelected: (AppLanguage) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var nameFontSize by remember(selected) { mutableStateOf(15.sp) }
     Box(modifier = modifier) {
         Surface(
             onClick = { if (enabled) expanded = true },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(62.dp),
-            shape = RoundedCornerShape(18.dp),
+                .height(54.dp),
+            shape = RoundedCornerShape(16.dp),
             color = background,
             border = BorderStroke(2.dp, color.copy(alpha = 0.66f)),
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 9.dp),
+                modifier = Modifier.padding(horizontal = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     modifier = Modifier
-                        .size(31.dp)
+                        .size(28.dp)
                         .background(color, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = selected.code.uppercase(),
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = 10.sp,
                         fontWeight = FontWeight.ExtraBold,
                     )
                 }
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(5.dp))
                 Text(
                     text = selected.nativeName,
                     modifier = Modifier.weight(1f),
                     fontFamily = FontFamily.Serif,
-                    fontSize = 16.sp,
+                    fontSize = nameFontSize,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { result ->
+                        if (result.hasVisualOverflow && nameFontSize.value > 9f) {
+                            nameFontSize = (nameFontSize.value - 1f).sp
+                        }
+                    },
                 )
                 Icon(
                     Icons.Filled.ArrowDropDown,
                     contentDescription = null,
                     tint = color,
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier.size(18.dp),
                 )
             }
         }
@@ -713,7 +710,8 @@ private fun SettingsScreen(
     onSerbianScript: (SerbianScript) -> Unit,
     onDownloadOfflineModel: () -> Unit,
     onDeleteOfflineModel: () -> Unit,
-    onTtsEngine: (TtsEngine) -> Unit,
+    onDownloadWhisperModel: () -> Unit,
+    onDeleteWhisperModel: () -> Unit,
     onSttEngine: (SttEngine) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -760,8 +758,28 @@ private fun SettingsScreen(
                     value = state.sttEngine,
                     items = SttEngine.entries,
                     itemLabel = { it.label },
+                    itemEnabled = { engine ->
+                        engine != SttEngine.WHISPER_OFFLINE || state.whisperRuntimeAvailable
+                    },
                     onSelected = onSttEngine,
                 )
+                if (!state.whisperRuntimeAvailable) {
+                    Text(
+                        text = "Whisper Offline requires a 64-bit ARM Android phone.",
+                        color = SayItMuted,
+                        fontSize = 13.sp,
+                    )
+                }
+                if (state.sttEngine == SttEngine.WHISPER_OFFLINE) {
+                    OfflineModelPanel(
+                        title = "Whisper Base Multilingual Q5_1",
+                        subtitle = "On-device recognition for every app language",
+                        status = state.whisperModelStatus,
+                        downloadSizeLabel = state.whisperModelDownloadSizeLabel,
+                        onDownload = onDownloadWhisperModel,
+                        onDelete = onDeleteWhisperModel,
+                    )
+                }
             }
 
             SettingsSection(
@@ -782,7 +800,7 @@ private fun SettingsScreen(
                 )
                 if (!isOfflineOpusDirection(state.languageA, state.languageB)) {
                     Text(
-                        text = "Offline OPUS is available only for Russian ↔ Serbian.",
+                        text = "Offline OPUS is available for Russian ↔ Serbian or Croatian.",
                         color = SayItMuted,
                         fontSize = 13.sp,
                     )
@@ -795,36 +813,32 @@ private fun SettingsScreen(
                     )
                 }
                 if (state.translationEngine == TranslationEngine.OFFLINE_OPUS) {
-                    Text(
-                        text = "Serbian output",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    SettingPicker(
-                        value = state.serbianScript,
-                        items = SerbianScript.entries,
-                        itemLabel = { it.label },
-                        onSelected = onSerbianScript,
-                    )
+                    if (
+                        state.languageA == AppLanguage.SERBIAN ||
+                        state.languageB == AppLanguage.SERBIAN
+                    ) {
+                        Text(
+                            text = "Serbian output",
+                            color = SayItMuted,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        SettingPicker(
+                            value = state.serbianScript,
+                            items = SerbianScript.entries,
+                            itemLabel = { it.label },
+                            onSelected = onSerbianScript,
+                        )
+                    }
                     OfflineModelPanel(
+                        title = "Russian ↔ Serbian / Croatian",
+                        subtitle = "Offline translation",
                         status = state.offlineModelStatus,
                         downloadSizeLabel = state.offlineModelDownloadSizeLabel,
                         onDownload = onDownloadOfflineModel,
                         onDelete = onDeleteOfflineModel,
                     )
                 }
-            }
-
-            SettingsSection(
-                title = "Playback",
-            ) {
-                SettingPicker(
-                    value = state.ttsEngine,
-                    items = TtsEngine.entries,
-                    itemLabel = { it.label },
-                    onSelected = onTtsEngine,
-                )
             }
 
             SettingsSection(
@@ -1067,6 +1081,8 @@ private fun <T> SettingPicker(
 
 @Composable
 private fun OfflineModelPanel(
+    title: String,
+    subtitle: String,
     status: OfflineModelStatus,
     downloadSizeLabel: String,
     onDownload: () -> Unit,
@@ -1081,8 +1097,12 @@ private fun OfflineModelPanel(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Russian ↔ Serbian", color = SayItInk, fontWeight = FontWeight.Bold)
-            Text("Offline", color = SayItMuted, fontSize = 13.sp)
+            Text(
+                title,
+                color = SayItInk,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(subtitle, color = SayItMuted, fontSize = 13.sp)
             when (status) {
                 OfflineModelStatus.NotInstalled -> Button(
                     onClick = onDownload,

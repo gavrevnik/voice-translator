@@ -9,11 +9,13 @@ import java.nio.ByteOrder
 
 class AppModelsTest {
     @Test
-    fun `language registry contains the supported five languages`() {
+    fun `language registry contains the supported six languages`() {
         assertEquals(
-            setOf("sr", "en", "ro", "ru", "es"),
+            setOf("sr", "hr", "en", "ro", "ru", "es"),
             AppLanguage.entries.map { it.code }.toSet(),
         )
+        assertEquals("hr-HR", AppLanguage.CROATIAN.bcp47)
+        assertEquals("hr", AppLanguage.CROATIAN.whisperCode)
     }
 
     @Test
@@ -31,19 +33,46 @@ class AppModelsTest {
     }
 
     @Test
-    fun `Android system text to speech remains the default`() {
-        assertEquals(TtsEngine.SYSTEM, TranslatorUiState().ttsEngine)
-        assertEquals(setOf(TtsEngine.GEMINI, TtsEngine.SYSTEM), TtsEngine.entries.toSet())
+    fun `progress labels use compact engine names`() {
+        assertEquals("Android", SttEngine.SYSTEM.progressLabel)
+        assertEquals("Groq Whisper", SttEngine.GROQ.progressLabel)
+        assertEquals("Whisper Offline", SttEngine.WHISPER_OFFLINE.progressLabel)
+        assertEquals("Slavic Offline", TranslationOption.OFFLINE_OPUS.progressLabel)
+        assertEquals("Android", PLAYBACK_PROGRESS_LABEL)
     }
 
     @Test
     fun `system speech recognition remains the default`() {
         assertEquals(SttEngine.SYSTEM, TranslatorUiState().sttEngine)
         assertEquals("whisper-large-v3", GROQ_STT_MODEL)
+        assertEquals("base-q5_1", WHISPER_OFFLINE_MODEL)
         assertEquals(
-            setOf(SttEngine.SYSTEM, SttEngine.GROQ),
+            setOf(SttEngine.SYSTEM, SttEngine.GROQ, SttEngine.WHISPER_OFFLINE),
             SttEngine.entries.toSet(),
         )
+    }
+
+    @Test
+    fun `system speech errors explain unsupported and missing offline languages`() {
+        val unsupported = systemSpeechRecognizerErrorMessage(12, AppLanguage.SERBIAN)
+        val unavailable = systemSpeechRecognizerErrorMessage(13, AppLanguage.SERBIAN)
+
+        assertTrue(unsupported.contains("does not support Serbian"))
+        assertTrue(unsupported.contains("error 12"))
+        assertTrue(unsupported.contains("offline Serbian speech pack"))
+        assertTrue(unavailable.contains("not downloaded"))
+        assertTrue(unavailable.contains("error 13"))
+    }
+
+    @Test
+    fun `system TTS errors explain offline voice setup`() {
+        val missing = offlineVoiceMissingMessage(AppLanguage.SERBIAN)
+        val serviceFailure = systemTtsErrorMessage(-4, AppLanguage.SERBIAN)
+
+        assertTrue(missing.contains("Offline Serbian voice is not installed"))
+        assertTrue(missing.contains("Install voice data"))
+        assertTrue(serviceFailure.contains("text-to-speech service failed"))
+        assertTrue(serviceFailure.contains("offline voice is installed"))
     }
 
     @Test
@@ -70,9 +99,12 @@ class AppModelsTest {
     }
 
     @Test
-    fun `offline OPUS is exposed only for Russian and Serbian`() {
+    fun `offline OPUS is exposed for Russian with Serbian or Croatian`() {
         assertTrue(isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.SERBIAN))
         assertTrue(isOfflineOpusDirection(AppLanguage.SERBIAN, AppLanguage.RUSSIAN))
+        assertTrue(isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.CROATIAN))
+        assertTrue(isOfflineOpusDirection(AppLanguage.CROATIAN, AppLanguage.RUSSIAN))
+        assertTrue(!isOfflineOpusDirection(AppLanguage.SERBIAN, AppLanguage.CROATIAN))
         assertTrue(!isOfflineOpusDirection(AppLanguage.RUSSIAN, AppLanguage.ENGLISH))
     }
 
@@ -97,6 +129,14 @@ class AppModelsTest {
         assertEquals(
             ">>rus<< Treba mi kafa.",
             offlineOpusInput(AppLanguage.RUSSIAN, SerbianScript.LATIN, "Treba mi kafa."),
+        )
+        assertEquals(
+            ">>hrv<< Где находится вокзал?",
+            offlineOpusInput(
+                AppLanguage.CROATIAN,
+                SerbianScript.LATIN,
+                "Где находится вокзал?",
+            ),
         )
     }
 
@@ -144,8 +184,8 @@ class AppModelsTest {
         sha256 = TEST_SHA256,
         downloadSize = 4,
         installedSize = 4,
-        supportedDirections = setOf("ru-sr", "sr-ru"),
-        supportedScripts = setOf("srp_Latn", "srp_Cyrl"),
+        supportedDirections = setOf("ru-sr", "sr-ru", "ru-hr", "hr-ru"),
+        supportedScripts = setOf("srp_Latn", "srp_Cyrl", "hrv"),
         runtimeType = "test",
         runtimeVersion = "1",
         requiredFiles = setOf("model.bin"),

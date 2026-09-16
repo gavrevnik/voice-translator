@@ -9,3 +9,9 @@ it with `android/tools/build_translate_kit_aar.sh`. The app therefore targets
 modern arm64 Android phones and requires API 28 or newer.
 
 Licensing and third-party notices are in this directory.
+
+`whisperlib-release.aar` is an arm64-only `whisper.cpp` runtime built from commit
+`da54572229bcf64ba367d96c7ef15770376c4280`. It contains native inference
+libraries but no model weights. The multilingual `base-q5_1` model is downloaded
+separately after the user selects Whisper Offline. `whisper.cpp` is MIT licensed;
+the license text is in [`LICENSE.whisper.cpp`](LICENSE.whisper.cpp).

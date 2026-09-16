@@ -10,11 +10,14 @@
   "runtimeVersion": "translate-kit-android 0.1.0",
   "supportedDirections": [
     "ru-sr",
-    "sr-ru"
+    "sr-ru",
+    "ru-hr",
+    "hr-ru"
   ],
   "supportedScripts": [
     "srp_Latn",
-    "srp_Cyrl"
+    "srp_Cyrl",
+    "hrv"
   ],
   "defaultSerbianScript": "srp_Latn",
   "files": [

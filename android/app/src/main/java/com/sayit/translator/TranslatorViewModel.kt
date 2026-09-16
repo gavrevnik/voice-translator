@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class TranslatorViewModel(application: Application) : AndroidViewModel(application) {
     private val apiKeyStore = ApiKeyStore(application)
@@ -23,9 +24,10 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private val offlineTranslationProvider =
         OfflineOpusTranslationProvider(application, offlineModelManager)
     private val systemTtsProvider: TtsProvider = SystemTtsProvider(application)
-    private val geminiTtsProvider: TtsProvider = GeminiTtsProvider(BuildConfig.GEMINI_API_KEY)
     private val systemProvider = SystemSttProvider(application)
     private val groqProvider = GroqWhisperSttProvider()
+    private val whisperModelManager = WhisperModelManager(application)
+    private val whisperProvider = WhisperSttProvider(whisperModelManager)
     private var activeSttProvider: SttProvider? = null
     private var timerJob: Job? = null
     private var turnGeneration = 0L
@@ -35,13 +37,15 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         TranslatorUiState(
             languageA = settings.languageA,
             languageB = settings.languageB,
-            ttsEngine = settings.ttsEngine,
             sttEngine = settings.sttEngine,
             serbianScript = settings.serbianScript,
             offlineModelStatus = offlineModelManager.status.value,
             offlineModelDownloadSizeLabel = offlineModelManager.manifest.downloadSizeLabel,
             offlineRuntimeAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
                 Build.SUPPORTED_ABIS.any { it == "arm64-v8a" },
+            whisperModelStatus = whisperModelManager.status.value,
+            whisperModelDownloadSizeLabel = whisperModelManager.manifest.downloadSizeLabel,
+            whisperRuntimeAvailable = Build.SUPPORTED_ABIS.any { it == "arm64-v8a" },
             hasOpenAiApiKey = apiKeyStore.hasKey(),
         ),
     )
@@ -51,6 +55,11 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             offlineModelManager.status.collect { modelStatus ->
                 _uiState.update { it.copy(offlineModelStatus = modelStatus) }
+            }
+        }
+        viewModelScope.launch {
+            whisperModelManager.status.collect { modelStatus ->
+                _uiState.update { it.copy(whisperModelStatus = modelStatus) }
             }
         }
     }
@@ -108,24 +117,6 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun swapLanguages() {
-        val current = _uiState.value
-        if (current.status != VoiceStatus.READY && current.status != VoiceStatus.ERROR) return
-        settings.languageA = current.languageB
-        settings.languageB = current.languageA
-        _uiState.update {
-            it.copy(
-                languageA = current.languageB,
-                languageB = current.languageA,
-                textA = "",
-                textB = "",
-                resultSide = null,
-                status = VoiceStatus.READY,
-                error = null,
-            )
-        }
-    }
-
     fun setTranslationOption(option: TranslationOption) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
         val state = _uiState.value
@@ -168,16 +159,24 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun setTtsEngine(engine: TtsEngine) {
-        if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
-        systemTtsProvider.stop()
-        geminiTtsProvider.stop()
-        settings.ttsEngine = engine
-        _uiState.update { it.copy(ttsEngine = engine, error = null) }
+    fun downloadWhisperModel() {
+        if (_uiState.value.whisperModelStatus is OfflineModelStatus.Downloading) return
+        viewModelScope.launch { whisperModelManager.downloadAndInstall() }
+    }
+
+    fun deleteWhisperModel() {
+        viewModelScope.launch {
+            whisperProvider.release()
+            whisperModelManager.deleteModel()
+        }
     }
 
     fun setSttEngine(engine: SttEngine) {
         if (_uiState.value.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
+        if (engine == SttEngine.WHISPER_OFFLINE && !_uiState.value.whisperRuntimeAvailable) {
+            _uiState.update { it.copy(status = VoiceStatus.ERROR, error = WHISPER_RUNTIME_MESSAGE) }
+            return
+        }
         settings.sttEngine = engine
         _uiState.update { it.copy(sttEngine = engine, error = null) }
     }
@@ -204,13 +203,12 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         if (state.status != VoiceStatus.READY) return
         val text = if (side == LanguageSide.A) state.textA else state.textB
         val language = if (side == LanguageSide.A) state.languageA else state.languageB
-        val ttsProvider = ttsProviderFor(state.ttsEngine)
         val generation = ++turnGeneration
         viewModelScope.launch {
             runCatching {
                 _uiState.update { it.copy(status = VoiceStatus.SPEAKING, error = null) }
                 val requestedAt = SystemClock.elapsedRealtime()
-                ttsProvider.speak(text, language) {
+                systemTtsProvider.speak(text, language) {
                     logTiming("playback_start", SystemClock.elapsedRealtime() - requestedAt)
                 }
                 logTiming("playback_total", SystemClock.elapsedRealtime() - requestedAt)
@@ -225,7 +223,6 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         if (_uiState.value.status != VoiceStatus.SPEAKING) return
         turnGeneration += 1
         systemTtsProvider.stop()
-        geminiTtsProvider.stop()
         activeSttProvider = null
         _uiState.update {
             it.copy(status = VoiceStatus.READY, activeSide = null, elapsedSeconds = 0)
@@ -261,18 +258,26 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 return
             }
         }
-        if (state.ttsEngine == TtsEngine.GEMINI && BuildConfig.GEMINI_API_KEY.isBlank()) {
-            showError(IllegalStateException("Gemini API key is required for Gemini TTS."))
-            return
+        if (state.sttEngine == SttEngine.WHISPER_OFFLINE) {
+            if (!state.whisperRuntimeAvailable) {
+                showError(IllegalStateException(WHISPER_RUNTIME_MESSAGE))
+                return
+            }
+            if (state.whisperModelStatus !is OfflineModelStatus.Installed) {
+                showError(
+                    IllegalStateException("Download the Whisper Offline model in Settings first."),
+                )
+                return
+            }
         }
         val language = if (side == LanguageSide.A) state.languageA else state.languageB
         val generation = ++turnGeneration
         val provider = when (state.sttEngine) {
             SttEngine.SYSTEM -> systemProvider
             SttEngine.GROQ -> groqProvider
+            SttEngine.WHISPER_OFFLINE -> whisperProvider
         }
         systemTtsProvider.stop()
-        geminiTtsProvider.stop()
         activeSttProvider = provider
         recordingStartedAtMs = SystemClock.elapsedRealtime()
         var firstPartialLogged = false
@@ -376,9 +381,8 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                 }
 
                 _uiState.update { it.copy(status = VoiceStatus.SPEAKING) }
-                val ttsProvider = ttsProviderFor(snapshot.ttsEngine)
                 val playbackRequestedAt = SystemClock.elapsedRealtime()
-                ttsProvider.speak(translated.translatedText, targetLanguage) {
+                systemTtsProvider.speak(translated.translatedText, targetLanguage) {
                     logTiming("playback_start", SystemClock.elapsedRealtime() - playbackRequestedAt)
                     logTiming("stop_tap_to_playback_start", SystemClock.elapsedRealtime() - stoppedAt)
                 }
@@ -432,14 +436,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         systemProvider.destroy()
         groqProvider.cancel()
         systemTtsProvider.release()
-        geminiTtsProvider.release()
+        runBlocking { whisperProvider.release() }
         offlineTranslationProvider.close()
         super.onCleared()
-    }
-
-    private fun ttsProviderFor(engine: TtsEngine): TtsProvider = when (engine) {
-        TtsEngine.SYSTEM -> systemTtsProvider
-        TtsEngine.GEMINI -> geminiTtsProvider
     }
 
     private fun logTiming(stage: String, durationMs: Long) {
@@ -449,8 +448,11 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private companion object {
         const val TIMING_TAG = "SayItTiming"
         const val OFFLINE_PAIR_MESSAGE =
-            "Offline OPUS supports Russian ↔ Serbian only. Choose a cloud model for this pair."
+            "Offline OPUS supports Russian ↔ Serbian or Croatian only. " +
+                "Choose a cloud model for this pair."
         const val OFFLINE_RUNTIME_MESSAGE =
             "Offline OPUS requires an arm64 phone running Android 9 or newer."
+        const val WHISPER_RUNTIME_MESSAGE =
+            "Whisper Offline requires a 64-bit ARM Android phone."
     }
 }

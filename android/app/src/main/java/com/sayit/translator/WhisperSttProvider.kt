@@ -1,7 +1,6 @@
 package com.sayit.translator
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -12,9 +11,8 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** Optional on-device provider. This file is intentionally outside app/src and is not compiled. */
-class WhisperSttProvider(private val context: Context) : SttProvider {
-    private val audioRecorder = PcmAudioRecorder()
+class WhisperSttProvider(private val modelManager: WhisperModelManager) : SttProvider {
+    private val audioRecorder = WhisperPcmAudioRecorder()
     private var language = AppLanguage.ENGLISH
     private var partialResult: (String) -> Unit = {}
     private var whisperContext: WhisperContext? = null
@@ -28,9 +26,8 @@ class WhisperSttProvider(private val context: Context) : SttProvider {
     override suspend fun stop(): String = withContext(Dispatchers.Default) {
         val samples = audioRecorder.stop()
         if (samples.isEmpty()) error("No audio was recorded.")
-        val engine = whisperContext ?: WhisperContext.createContextFromAsset(
-            context.assets,
-            WHISPER_MODEL_ASSET,
+        val engine = whisperContext ?: WhisperContext.createContextFromFile(
+            modelManager.installedModel().absolutePath,
         ).also { whisperContext = it }
         engine.transcribeData(samples, language.whisperCode).trim().ifBlank {
             error("Whisper could not recognize speech. Try speaking closer to the phone.")
@@ -46,13 +43,9 @@ class WhisperSttProvider(private val context: Context) : SttProvider {
         whisperContext?.release()
         whisperContext = null
     }
-
-    private companion object {
-        const val WHISPER_MODEL_ASSET = "models/ggml-base.bin"
-    }
 }
 
-private class PcmAudioRecorder {
+private class WhisperPcmAudioRecorder {
     @Volatile private var recording = false
     private var audioRecord: AudioRecord? = null
     private var worker: Thread? = null
@@ -85,7 +78,7 @@ private class PcmAudioRecorder {
         audioRecord = recorder
         recording = true
         recorder.startRecording()
-        worker = Thread({ captureLoop(recorder, minBufferSize) }, "SayItAudioRecorder").apply {
+        worker = Thread({ captureLoop(recorder, minBufferSize) }, "SayItWhisperRecorder").apply {
             start()
         }
     }

@@ -346,8 +346,8 @@ def main() -> None:
         "quantization": "INT8 / Marian intgemm8",
         "runtimeType": "Bergamot/Marian via translate-kit",
         "runtimeVersion": RUNTIME_VERSION,
-        "supportedDirections": ["ru-sr", "sr-ru"],
-        "supportedScripts": ["srp_Latn", "srp_Cyrl"],
+        "supportedDirections": ["ru-sr", "sr-ru", "ru-hr", "hr-ru"],
+        "supportedScripts": ["srp_Latn", "srp_Cyrl", "hrv"],
         "defaultSerbianScript": "srp_Latn",
         "files": file_metadata,
     }

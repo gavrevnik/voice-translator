@@ -10,12 +10,9 @@ class AppSettings(context: Context) {
             .remove(KEY_MODEL)
             .remove(KEY_GEMINI_MODEL)
             .remove(KEY_TRANSLATION_ENGINE)
+            .remove(KEY_TTS_ENGINE)
             .apply()
     }
-
-    var ttsEngine: TtsEngine
-        get() = enumValue(preferences.getString(KEY_TTS_ENGINE, null), TtsEngine.SYSTEM)
-        set(value) = preferences.edit().putString(KEY_TTS_ENGINE, value.name).apply()
 
     var sttEngine: SttEngine
         get() = enumValue(preferences.getString(KEY_STT, null), SttEngine.SYSTEM)

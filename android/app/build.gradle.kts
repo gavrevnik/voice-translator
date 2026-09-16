@@ -24,6 +24,8 @@ val geminiApiKey = providers.environmentVariable("GEMINI_API_KEY").orNull
     ?: readLocalEnv("GEMINI_API_KEY")
 val offlineOpusModelUrl = providers.environmentVariable("OFFLINE_OPUS_MODEL_URL").orNull
     ?: readLocalEnv("OFFLINE_OPUS_MODEL_URL")
+val offlineWhisperModelUrl = providers.environmentVariable("OFFLINE_WHISPER_MODEL_URL").orNull
+    ?: readLocalEnv("OFFLINE_WHISPER_MODEL_URL")
 
 fun String.asBuildConfigString(): String = "\"" +
     replace("\\", "\\\\").replace("\"", "\\\"") +
@@ -37,8 +39,8 @@ android {
         applicationId = "com.sayit.translator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.6.0"
+        versionCode = 7
+        versionName = "0.7.0"
 
         buildConfigField("String", "GROQ_API_KEY", groqApiKey.asBuildConfigString())
         buildConfigField("String", "GEMINI_API_KEY", geminiApiKey.asBuildConfigString())
@@ -46,6 +48,11 @@ android {
             "String",
             "OFFLINE_OPUS_MODEL_URL",
             offlineOpusModelUrl.asBuildConfigString(),
+        )
+        buildConfigField(
+            "String",
+            "OFFLINE_WHISPER_MODEL_URL",
+            offlineWhisperModelUrl.asBuildConfigString(),
         )
 
     }
@@ -94,6 +101,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(files("libs/translate-kit-android-0.1.0-arm64.aar"))
+    implementation(files("libs/whisperlib-release.aar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

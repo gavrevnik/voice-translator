@@ -1,23 +1,13 @@
-# Optional on-device Whisper module
+# On-device Whisper build source
 
-This folder is deliberately outside the Android app source set. The current APK contains only
-Samsung/Android `SpeechRecognizer`; neither the 141 MB model nor the native Whisper libraries are
-packaged.
+This folder keeps the pinned Android `whisper.cpp` source module used to build
+`app/libs/whisperlib-release.aar`. The application includes that arm64 runtime,
+but model weights are deliberately excluded from both Git and the APK.
 
-To restore Whisper later:
+The active app provider is `app/src/main/java/com/sayit/translator/WhisperSttProvider.kt`.
+It loads `ggml-base-q5_1.bin` from app-private storage after the user downloads
+the model in Settings. Delivery metadata, checksum and the GitHub Release URL
+live in `app/src/main/assets/whisper_models.json`.
 
-1. Copy `WhisperSttProvider.kt` into
-   `app/src/main/java/com/sayit/translator/`.
-2. Copy `models/ggml-base.bin` into `app/src/main/assets/models/`.
-3. Add the following to `settings.gradle.kts`:
-
-   ```kotlin
-   include(":whisperlib")
-   project(":whisperlib").projectDir = file("optional/whisper/whisperlib")
-   ```
-
-4. Add `implementation(project(":whisperlib"))` to `app/build.gradle.kts`.
-5. Instantiate `WhisperSttProvider` in `TranslatorViewModel` and add the desired engine selector.
-
-The optional provider remains batch-based: it can publish the final transcript after `stop()`, but
-does not emit live partial words without a streaming/chunked recognition redesign.
+The provider is batch-based: it publishes the final transcript after `stop()`
+and does not emit live partial words without a streaming/chunked redesign.

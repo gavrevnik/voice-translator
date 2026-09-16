@@ -24,7 +24,8 @@ class OfflineOpusTranslationProvider(
         serbianScript: SerbianScript,
     ): TranslationResult = withContext(Dispatchers.IO) {
         require(modelManager.supports(sourceLanguage, targetLanguage)) {
-            "Offline OPUS supports Russian ↔ Serbian only. Choose a cloud model for this pair."
+            "Offline OPUS supports Russian ↔ Serbian or Croatian only. " +
+                "Choose a cloud model for this pair."
         }
         val translation = synchronized(this@OfflineOpusTranslationProvider) {
             val runtimeModel = loadedModel ?: loadModel().also { loadedModel = it }
@@ -72,6 +73,7 @@ internal fun offlineOpusInput(
     val targetToken = when (targetLanguage) {
         AppLanguage.RUSSIAN -> ">>rus<<"
         AppLanguage.SERBIAN -> serbianScript.targetToken
+        AppLanguage.CROATIAN -> ">>hrv<<"
         else -> error("Unsupported offline target language: ${targetLanguage.canonicalName}")
     }
     return "$targetToken ${transcript.trim()}"

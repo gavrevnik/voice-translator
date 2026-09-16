@@ -1,5 +1,15 @@
 # Third-party licenses
 
+## Whisper speech-recognition runtime
+
+`whisperlib-release.aar` contains `whisper.cpp` and its GGML runtime, built from
+commit `da54572229bcf64ba367d96c7ef15770376c4280`. They are distributed under the
+MIT License; the complete upstream text is included as
+[`LICENSE.whisper.cpp`](LICENSE.whisper.cpp). Model weights are not bundled in
+the AAR or APK and are delivered separately as a GitHub Release asset.
+
+## Translation runtime
+
 `translate-kit` is licensed under Apache-2.0 (see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE)).
 It statically links a number of third-party components into its native library
 (`libtranslate-kit.so`). This file lists every such component, its license, and its
