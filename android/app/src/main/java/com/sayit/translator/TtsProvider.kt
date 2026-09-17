@@ -33,6 +33,8 @@ class SystemTtsProvider(context: Context) : TtsProvider {
     private var activeOnStarted: (() -> Unit)? = null
     private var activeLanguage: AppLanguage? = null
     private var activeEngineName = "Android"
+    private var activeVoiceName = "unknown"
+    private var activeVoiceLocaleTag = "unknown"
 
     override suspend fun speak(text: String, language: AppLanguage, onStarted: (() -> Unit)?) {
         val candidate = preferredInstalledEngine(language) ?: error(offlineVoiceMissingMessage(language))
@@ -58,6 +60,8 @@ class SystemTtsProvider(context: Context) : TtsProvider {
             activeOnStarted = onStarted
             activeLanguage = language
             activeEngineName = candidate.providerName
+            activeVoiceName = offlineVoice.name
+            activeVoiceLocaleTag = offlineVoice.locale.toLanguageTag()
             val status = session.textToSpeech.speak(
                 text,
                 TextToSpeech.QUEUE_FLUSH,
@@ -171,6 +175,10 @@ class SystemTtsProvider(context: Context) : TtsProvider {
     }
 
     internal fun activeServiceName(): String = activeEngineName
+
+    internal fun activeVoiceName(): String = activeVoiceName
+
+    internal fun activeVoiceLocaleTag(): String = activeVoiceLocaleTag
 
     override fun stop() {
         sessions.values.forEach { session -> session.textToSpeech.stop() }

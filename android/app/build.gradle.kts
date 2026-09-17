@@ -38,8 +38,8 @@ android {
         applicationId = "com.sayit.translator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "0.16.8"
+        versionCode = 32
+        versionName = "0.18.5"
 
         buildConfigField("String", "GROQ_API_KEY", groqApiKey.asBuildConfigString())
         buildConfigField("String", "GEMINI_API_KEY", geminiApiKey.asBuildConfigString())
@@ -98,6 +98,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.mlkit:language-id:17.0.6")
     implementation(files("libs/translate-kit-android-0.1.0-arm64.aar"))
     implementation(files("libs/whisperlib-release.aar"))
 

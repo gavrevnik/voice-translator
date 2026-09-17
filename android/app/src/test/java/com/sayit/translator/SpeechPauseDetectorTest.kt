@@ -19,6 +19,37 @@ class SpeechPauseDetectorTest {
     }
 
     @Test
+    fun `speech writer does not retain leading silence`() {
+        val writer = SpeechOnlyPcmWriter(detector())
+
+        repeat(200) {
+            assertFalse(writer.accept(silenceFrame, silenceFrame.size))
+        }
+        repeat(15) {
+            assertFalse(writer.accept(speechFrame, speechFrame.size))
+        }
+
+        assertEquals(215 * FRAME_SAMPLES * 2, writer.capturedPcmBytes)
+        assertEquals(15 * FRAME_SAMPLES * 2, writer.speechPcmByteCount)
+        assertEquals(15 * FRAME_SAMPLES * 2, writer.speechPcm().size)
+    }
+
+    @Test
+    fun `speech writer discards a short noise candidate before real speech`() {
+        val writer = SpeechOnlyPcmWriter(detector())
+
+        repeat(5) {
+            assertFalse(writer.accept(speechFrame, speechFrame.size))
+        }
+        assertFalse(writer.accept(silenceFrame, silenceFrame.size))
+        repeat(15) {
+            assertFalse(writer.accept(speechFrame, speechFrame.size))
+        }
+
+        assertEquals(15 * FRAME_SAMPLES * 2, writer.speechPcmByteCount)
+    }
+
+    @Test
     fun `configured silence stops once after speech`() {
         val detector = detector()
 

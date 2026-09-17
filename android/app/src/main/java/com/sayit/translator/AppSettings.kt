@@ -14,7 +14,10 @@ class AppSettings(context: Context) {
     }
 
     var sttEngine: SttEngine
-        get() = enumValue(preferences.getString(KEY_STT, null), SttEngine.GROQ)
+        get() = enumValue(
+            preferences.getString(KEY_STT, null),
+            SttEngine.GEMINI_TRANSCRIBE_LIVE,
+        )
         set(value) = preferences.edit().putString(KEY_STT, value.name).apply()
 
     var layoutMode: LayoutMode

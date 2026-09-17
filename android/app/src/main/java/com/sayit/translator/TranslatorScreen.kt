@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -95,13 +96,19 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
     var settingsOpen by remember { mutableStateOf(false) }
     var expandedPhrase by remember { mutableStateOf<ExpandedPhrase?>(null) }
     var pendingSide by remember { mutableStateOf<LanguageSide?>(null) }
+    var pendingLiveSide by remember { mutableStateOf<LanguageSide?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val side = pendingSide
+        val liveSide = pendingLiveSide
         pendingSide = null
-        if (granted && side != null) viewModel.tapMicrophone(side)
-        else if (!granted) viewModel.reportPermissionDenied()
+        pendingLiveSide = null
+        when {
+            granted && liveSide != null -> viewModel.toggleLiveMode(liveSide)
+            granted && side != null -> viewModel.tapMicrophone(side)
+            !granted -> viewModel.reportPermissionDenied()
+        }
     }
     val languagePackLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -114,6 +121,14 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             viewModel.tapMicrophone(side)
         } else {
             pendingSide = side
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    val onLive: (LanguageSide) -> Unit = { initialSpeakerSide ->
+        if (state.liveModeActive || context.hasMicrophonePermission()) {
+            viewModel.toggleLiveMode(initialSpeakerSide)
+        } else {
+            pendingLiveSide = initialSpeakerSide
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
@@ -166,8 +181,13 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
             onExportLogs = {
                 viewModel.createDiagnosticsShareIntent()?.let { shareIntent ->
                     context.startActivity(
-                        Intent.createChooser(shareIntent, "Share last cycle logs"),
+                        Intent.createChooser(shareIntent, "Share diagnostics logs"),
                     )
+                }
+            },
+            onOpenCloudUsage = { url ->
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 }
             },
             onBack = { settingsOpen = false },
@@ -179,6 +199,7 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
         ConversationModeScreen(
             state = state,
             onMicrophone = onMicrophone,
+            onLive = onLive,
             onLanguage = viewModel::setLanguage,
             onToggleMode = viewModel::toggleLayoutMode,
             onOpenSettings = openSettings,
@@ -414,6 +435,7 @@ private fun MainControlRow(
 private fun ConversationModeScreen(
     state: TranslatorUiState,
     onMicrophone: (LanguageSide) -> Unit,
+    onLive: (LanguageSide) -> Unit,
     onLanguage: (LanguageSide, AppLanguage) -> Unit,
     onToggleMode: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -476,8 +498,10 @@ private fun ConversationModeScreen(
         ConversationControlRow(
             onOpenSettings = onOpenSettings,
             onExitConversation = onToggleMode,
+            onToggleLive = { onLive(bottomSide) },
             onSwapSides = { if (controlsEnabled) sidesSwapped = !sidesSwapped },
             enabled = controlsEnabled,
+            liveModeActive = state.liveModeActive,
         )
 
         AndroidLanguagePackActions(
@@ -522,8 +546,10 @@ private fun ConversationModeScreen(
 private fun ConversationControlRow(
     onOpenSettings: () -> Unit,
     onExitConversation: () -> Unit,
+    onToggleLive: () -> Unit,
     onSwapSides: () -> Unit,
     enabled: Boolean,
+    liveModeActive: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -534,6 +560,7 @@ private fun ConversationControlRow(
     ) {
         ConversationCentralControl(
             onClick = onOpenSettings,
+            enabled = enabled,
             imageVector = Icons.Filled.Settings,
             contentDescription = "Settings",
         )
@@ -543,6 +570,17 @@ private fun ConversationControlRow(
             active = true,
             imageVector = Icons.Filled.People,
             contentDescription = "Exit conversation mode",
+        )
+        ConversationCentralControl(
+            onClick = onToggleLive,
+            enabled = enabled || liveModeActive,
+            active = liveModeActive,
+            label = "LIVE",
+            contentDescription = if (liveModeActive) {
+                "Stop Conversation Live"
+            } else {
+                "Start Conversation Live"
+            },
         )
         ConversationCentralControl(
             onClick = onSwapSides,
@@ -556,8 +594,9 @@ private fun ConversationControlRow(
 @Composable
 private fun ConversationCentralControl(
     onClick: () -> Unit,
-    imageVector: ImageVector,
     contentDescription: String,
+    imageVector: ImageVector? = null,
+    label: String? = null,
     enabled: Boolean = true,
     active: Boolean = false,
 ) {
@@ -583,16 +622,27 @@ private fun ConversationCentralControl(
         enabled = enabled,
         interactionSource = interactionSource,
         modifier = Modifier
-            .size(26.dp)
+            .width(44.dp)
+            .height(30.dp)
             .background(background, shape)
             .border(1.dp, borderColor, shape),
     ) {
-        Icon(
-            imageVector = imageVector,
-            contentDescription = contentDescription,
-            tint = iconColor,
-            modifier = Modifier.size(13.dp),
-        )
+        if (label != null) {
+            Text(
+                text = label,
+                color = iconColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+            )
+        } else if (imageVector != null) {
+            Icon(
+                imageVector = imageVector,
+                contentDescription = contentDescription,
+                tint = iconColor,
+                modifier = Modifier.size(15.dp),
+            )
+        }
     }
 }
 
@@ -625,7 +675,7 @@ private fun ConversationParticipantPanel(
             color = color,
             background = background,
             isPartial = state.partialTranscriptSide == side,
-            showPlaybackControl = isTranslatedSide &&
+            showPlaybackControl = !state.liveModeActive && isTranslatedSide &&
                 state.status in listOf(VoiceStatus.READY, VoiceStatus.SPEAKING),
             isPlayingTranslation = isPlayingTranslation,
             onOpen = onOpenText,
@@ -1584,6 +1634,7 @@ private fun SettingsScreen(
     onOpenSttSettings: () -> Unit,
     onInstallTtsPack: (AppLanguage) -> Unit,
     onExportLogs: () -> Unit,
+    onOpenCloudUsage: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -1745,8 +1796,9 @@ private fun SettingsScreen(
                 title = "Automatic stop",
             ) {
                 Text(
-                    text = "After speech starts, Groq Whisper stops and begins translation " +
-                        "when this pause is reached. The Stop button remains available.",
+                    text = "After speech starts, Groq Whisper or Gemini Transcribe Live stops " +
+                        "and begins translation when this pause is reached. " +
+                        "The Stop button remains available.",
                     color = SayItMuted,
                     fontSize = 13.sp,
                 )
@@ -1793,8 +1845,9 @@ private fun SettingsScreen(
                 title = "Diagnostics",
             ) {
                 Text(
-                    text = "Exports the latest voice cycle only. Audio, speech text, " +
-                        "translations, and API keys are not included.",
+                    text = "Exports the latest normal voice cycle or the complete Live session " +
+                        "between Start and Stop. Audio, speech text, translations, and API " +
+                        "keys are not included.",
                     color = SayItMuted,
                     fontSize = 13.sp,
                 )
@@ -1819,9 +1872,67 @@ private fun SettingsScreen(
                     )
                 }
             }
+
+            SettingsSection(
+                title = "Cloud usage and limits",
+            ) {
+                Text(
+                    text = "Open the official dashboards and sign in to the account that owns " +
+                        "the API key used by this build.",
+                    color = SayItMuted,
+                    fontSize = 13.sp,
+                )
+                CloudUsageLink(
+                    label = "Gemini usage and rate limits",
+                    urlLabel = "aistudio.google.com",
+                    url = GEMINI_RATE_LIMITS_URL,
+                    onOpen = onOpenCloudUsage,
+                )
+                CloudUsageLink(
+                    label = "Groq Whisper usage",
+                    urlLabel = "console.groq.com/dashboard/usage",
+                    url = GROQ_USAGE_URL,
+                    onOpen = onOpenCloudUsage,
+                )
+                CloudUsageLink(
+                    label = "Groq Whisper rate limits",
+                    urlLabel = "console.groq.com/settings/limits",
+                    url = GROQ_LIMITS_URL,
+                    onOpen = onOpenCloudUsage,
+                )
+            }
         }
     }
 
+}
+
+@Composable
+private fun CloudUsageLink(
+    label: String,
+    urlLabel: String,
+    url: String,
+    onOpen: (String) -> Unit,
+) {
+    OutlinedButton(
+        onClick = { onOpen(url) },
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = SayItInk,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = urlLabel,
+                color = SayItMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
 }
 
 @Composable
@@ -1969,3 +2080,8 @@ private fun copyText(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Say it translation", text))
 }
+
+private const val GEMINI_RATE_LIMITS_URL =
+    "https://aistudio.google.com/rate-limit?timeRange=last-28-days"
+private const val GROQ_USAGE_URL = "https://console.groq.com/dashboard/usage"
+private const val GROQ_LIMITS_URL = "https://console.groq.com/settings/limits"

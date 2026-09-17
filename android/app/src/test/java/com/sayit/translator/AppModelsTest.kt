@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import okio.ByteString.Companion.encodeUtf8
 import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -50,14 +51,15 @@ class AppModelsTest {
     fun `progress labels use compact engine names`() {
         assertEquals("Android", SttEngine.SYSTEM.progressLabel)
         assertEquals("Groq Whisper", SttEngine.GROQ.progressLabel)
+        assertEquals("Gemini Live STT", SttEngine.GEMINI_TRANSCRIBE_LIVE.progressLabel)
         assertEquals("Whisper Offline", SttEngine.WHISPER_OFFLINE.progressLabel)
         assertEquals("Slavic FP32", TranslationOption.OFFLINE_OPUS_SLAVIC.progressLabel)
         assertEquals("Android", PLAYBACK_PROGRESS_LABEL)
     }
 
     @Test
-    fun `Groq recognition and Gemini 3_5 are the defaults`() {
-        assertEquals(SttEngine.GROQ, TranslatorUiState().sttEngine)
+    fun `Gemini Live recognition and Gemini 3_5 translation are the defaults`() {
+        assertEquals(SttEngine.GEMINI_TRANSCRIBE_LIVE, TranslatorUiState().sttEngine)
         assertEquals(GeminiTranslationModel.FLASH_3_5_LITE, TranslatorUiState().geminiModel)
         assertEquals(LayoutMode.SINGLE, TranslatorUiState().layoutMode)
         assertEquals(
@@ -67,11 +69,13 @@ class AppModelsTest {
         assertEquals(2f, TranslatorUiState().silenceAutoStopSeconds)
         assertEquals(2f, DEFAULT_SILENCE_AUTO_STOP_SECONDS)
         assertEquals("whisper-large-v3", GROQ_STT_MODEL)
+        assertEquals("gemini-3.5-transcribe-live", GEMINI_TRANSCRIBE_LIVE_MODEL)
         assertEquals("large-v3-turbo-q4_0", WHISPER_OFFLINE_MODEL)
         assertEquals(
             setOf(
                 SttEngine.SYSTEM,
                 SttEngine.GROQ,
+                SttEngine.GEMINI_TRANSCRIBE_LIVE,
                 SttEngine.WHISPER_OFFLINE,
             ),
             SttEngine.entries.toSet(),
@@ -285,6 +289,194 @@ class AppModelsTest {
         assertTrue(prompt.systemInstruction.contains("target_code = sr"))
         assertTrue(!prompt.systemInstruction.contains(transcript))
         assertEquals(transcript, prompt.userInput)
+    }
+
+    @Test
+    fun `live prompt uses detected language without mixing the transcript into instructions`() {
+        val transcript = "Where is the station?"
+        val prompt = liveTranslationPrompt("German", AppLanguage.ROMANIAN, transcript)
+
+        assertTrue(prompt.systemInstruction.contains("detected_source_language = German"))
+        assertTrue(prompt.systemInstruction.contains("target_language = Romanian"))
+        assertTrue(prompt.systemInstruction.contains("target_code = ro"))
+        assertTrue(!prompt.systemInstruction.contains(transcript))
+        assertEquals(transcript, prompt.userInput)
+    }
+
+    @Test
+    fun `Gemini HTTP trace separates connection server wait and response phases`() {
+        val trace = GeminiTranslationHttpTrace().apply {
+            callStartedAtMs = 1_000
+            dnsStartedAtMs = 1_010
+            dnsEndedAtMs = 1_020
+            connectObserved = true
+            connectStartedAtMs = 1_020
+            connectEndedAtMs = 1_090
+            tlsStartedAtMs = 1_035
+            tlsEndedAtMs = 1_085
+            requestStartedAtMs = 1_100
+            requestEndedAtMs = 1_115
+            responseHeadersStartedAtMs = 1_415
+            responseHeadersEndedAtMs = 1_420
+            responseBodyEndedAtMs = 1_435
+            callEndedAtMs = 1_435
+            requestBodyBytes = 600
+            responseBodyBytes = 240
+            resolvedAddressCount = 2
+        }
+
+        val metrics = trace.snapshot(nowMs = 2_000)
+
+        assertEquals("435", metrics["http_call_total_ms"])
+        assertEquals("10", metrics["dns_ms"])
+        assertEquals("70", metrics["connect_ms"])
+        assertEquals("50", metrics["tls_ms"])
+        assertEquals("15", metrics["request_send_ms"])
+        assertEquals("300", metrics["wait_for_response_headers_ms"])
+        assertEquals("415", metrics["ttfb_from_call_start_ms"])
+        assertEquals("20", metrics["response_read_ms"])
+        assertEquals("false", metrics["connection_reused"])
+    }
+
+    @Test
+    fun `only Groq and Gemini Live support Conversation Live`() {
+        assertTrue(SttEngine.GROQ.supportsConversationLive())
+        assertTrue(SttEngine.GEMINI_TRANSCRIBE_LIVE.supportsConversationLive())
+        assertTrue(!SttEngine.SYSTEM.supportsConversationLive())
+        assertTrue(!SttEngine.WHISPER_OFFLINE.supportsConversationLive())
+    }
+
+    @Test
+    fun `Gemini Live accepts binary setup frames`() {
+        assertEquals(
+            "{\"setupComplete\":{}}",
+            geminiLiveBinaryFrameText("{\"setupComplete\":{}}".encodeUtf8()),
+        )
+    }
+
+    @Test
+    fun `pair classifier resolves strong script evidence independently of speaking order`() {
+        assertSame(
+            AppLanguage.SERBIAN,
+            strongPairLanguageDecision(
+                "Где је железничка станица?",
+                AppLanguage.RUSSIAN,
+                AppLanguage.SERBIAN,
+            )?.language,
+        )
+        assertSame(
+            AppLanguage.ROMANIAN,
+            strongPairLanguageDecision(
+                "Unde este gară și cât costă?",
+                AppLanguage.SPANISH,
+                AppLanguage.ROMANIAN,
+            )?.language,
+        )
+        assertSame(
+            AppLanguage.SPANISH,
+            strongPairLanguageDecision(
+                "¿Dónde está la estación?",
+                AppLanguage.SPANISH,
+                AppLanguage.ENGLISH,
+            )?.language,
+        )
+        assertSame(
+            stablePairTieBreak(AppLanguage.SERBIAN, AppLanguage.RUSSIAN),
+            stablePairTieBreak(AppLanguage.RUSSIAN, AppLanguage.SERBIAN),
+        )
+    }
+
+    @Test
+    fun `pair classifier maps Cyrillic Croatian to Croatian instead of Russian`() {
+        val text = "\u041c\u043e\u0436\u0435, \u0458\u0435\u0434\u043d\u0430 \u0432\u0435\u043b\u0438\u043a\u0430 \u043f\u043b\u0435\u0441\u043a\u0430\u0432\u0438\u0446\u0430."
+        val features = pairLanguageDiagnosticFeatures(text)
+        val decision = strongPairLanguageDecision(
+            text = text,
+            languageA = AppLanguage.RUSSIAN,
+            languageB = AppLanguage.CROATIAN,
+        )
+
+        assertEquals("0", features["latin_letters"])
+        assertEquals(features["letter_characters"], features["cyrillic_letters"])
+        assertEquals("1.000", features["cyrillic_share"])
+        assertEquals("može, jedna velika pleskavica.", features["croatian_latin_probe"])
+        assertSame(AppLanguage.CROATIAN, decision?.language)
+        assertEquals("cyrillic_russian_croatian_pair", decision?.method)
+        assertTrue(decision?.evidence.orEmpty().contains("croatian_hints=4"))
+    }
+
+    @Test
+    fun `pair classifier handles Gemini Cyrillic variant and preserves Russian evidence`() {
+        assertSame(
+            AppLanguage.CROATIAN,
+            strongPairLanguageDecision(
+                "Може, їдна велика плескавица.",
+                AppLanguage.CROATIAN,
+                AppLanguage.RUSSIAN,
+            )?.language,
+        )
+        assertSame(
+            AppLanguage.RUSSIAN,
+            strongPairLanguageDecision(
+                "Можно одну большую котлету.",
+                AppLanguage.CROATIAN,
+                AppLanguage.RUSSIAN,
+            )?.language,
+        )
+    }
+
+    @Test
+    fun `live language aliases map south Slavic and Moldavian variants`() {
+        listOf("Serbian", "hr", "Bosnian").forEach { detected ->
+            val mapped = mapLiveDetectedLanguage(detected)
+            assertEquals("Serbian", mapped.canonicalName)
+            assertEquals(AppLanguage.SERBIAN, mapped.appLanguage)
+        }
+        listOf("Romanian", "mo", "Moldovan").forEach { detected ->
+            val mapped = mapLiveDetectedLanguage(detected)
+            assertEquals("Romanian", mapped.canonicalName)
+            assertEquals(AppLanguage.ROMANIAN, mapped.appLanguage)
+        }
+    }
+
+    @Test
+    fun `live language selects a matching side and falls back for unknown language`() {
+        assertEquals(
+            LanguageSide.A,
+            resolveLiveSpeakerSide(
+                detectedLanguage = mapLiveDetectedLanguage("Croatian"),
+                languageA = AppLanguage.SERBIAN,
+                languageB = AppLanguage.ENGLISH,
+                fallbackSide = LanguageSide.B,
+            ),
+        )
+        assertEquals(
+            LanguageSide.B,
+            resolveLiveSpeakerSide(
+                detectedLanguage = mapLiveDetectedLanguage("German"),
+                languageA = AppLanguage.RUSSIAN,
+                languageB = AppLanguage.ENGLISH,
+                fallbackSide = LanguageSide.B,
+            ),
+        )
+    }
+
+    @Test
+    fun `live transcript annotation is display-only for a third language`() {
+        val detected = mapLiveDetectedLanguage("German")
+
+        assertEquals(
+            "Recognized language — German\n\nGuten Tag",
+            liveTranscriptForDisplay("Guten Tag", detected, AppLanguage.RUSSIAN),
+        )
+        assertEquals(
+            "Dobar dan",
+            liveTranscriptForDisplay(
+                "Dobar dan",
+                mapLiveDetectedLanguage("Bosnian"),
+                AppLanguage.CROATIAN,
+            ),
+        )
     }
 
     @Test

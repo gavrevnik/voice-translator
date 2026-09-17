@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -20,7 +22,9 @@ import kotlinx.coroutines.runBlocking
 class TranslatorViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = AppSettings(application)
     private val diagnostics = TurnDiagnosticsRecorder(application)
-    private val geminiTranslationProvider: TranslationProvider = GeminiTranslationProvider()
+    private val geminiTranslationProvider = GeminiTranslationProvider(
+        diagnosticEvent = { name, fields -> diagnostics.event(name, fields) },
+    )
     private val offlineModelManager = OfflineModelManager(
         application,
         assetName = "offline_models.json",
@@ -41,16 +45,23 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private val groqProvider = GroqWhisperSttProvider(diagnosticEvent = { name, fields ->
         diagnostics.event(name, fields)
     })
+    private val geminiLiveTranscribeProvider =
+        GeminiLiveTranscribeSttProvider(diagnosticEvent = { name, fields ->
+            diagnostics.event(name, fields)
+        })
+    private val pairLanguageClassifier = PairLanguageClassifier()
     private val whisperModelManager = WhisperModelManager(application)
     private val whisperProvider = WhisperSttProvider(whisperModelManager) { name, fields ->
         diagnostics.event(name, fields)
     }
     private var activeSttProvider: SttProvider? = null
     private var timerJob: Job? = null
+    private var liveJob: Job? = null
     private var languagePackJob: Job? = null
     private var languagePackGeneration = 0L
     private var turnGeneration = 0L
     private var recordingStartedAtMs = 0L
+    private var livePreviousSpeaker: LanguageSide? = null
 
     private val _uiState = MutableStateFlow(
         TranslatorUiState(
@@ -94,10 +105,19 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     fun tapMicrophone(side: LanguageSide) {
         val state = _uiState.value
+        if (state.liveModeActive) return
         when {
             state.status == VoiceStatus.LISTENING && state.activeSide == side ->
                 finishTurn(side, StopTrigger.MANUAL)
             state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR -> startTurn(side)
+        }
+    }
+
+    fun toggleLiveMode(initialSpeakerSide: LanguageSide) {
+        if (_uiState.value.liveModeActive) {
+            stopLiveMode()
+        } else {
+            startLiveMode(initialSpeakerSide)
         }
     }
 
@@ -336,6 +356,10 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun stopPlayback() {
+        if (_uiState.value.liveModeActive) {
+            stopLiveMode()
+            return
+        }
         if (_uiState.value.status != VoiceStatus.SPEAKING) return
         turnGeneration += 1
         systemTtsProvider.stop()
@@ -354,6 +378,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun startTurn(side: LanguageSide) {
         val state = _uiState.value
+        if (state.liveModeActive) return
         if (state.translationEngine == TranslationEngine.GEMINI && BuildConfig.GEMINI_API_KEY.isBlank()) {
             showError(IllegalStateException("Gemini API key is not configured in this build."))
             return
@@ -405,6 +430,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update {
             it.copy(
                 status = VoiceStatus.RECOGNIZING,
+                liveModeActive = false,
                 activeSide = side,
                 partialTranscriptSide = null,
                 textA = "",
@@ -454,20 +480,27 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
                         }
                     }
                 }
-                if (provider === groqProvider) {
-                    groqProvider.start(
+                val onSilenceAutoStop = {
+                    viewModelScope.launch {
+                        if (generation == turnGeneration) {
+                            finishTurn(side, StopTrigger.SILENCE)
+                        }
+                    }
+                    Unit
+                }
+                when (provider) {
+                    groqProvider -> groqProvider.start(
                         language = language,
                         silenceAutoStopSeconds = state.silenceAutoStopSeconds,
-                        onSilenceAutoStop = {
-                            viewModelScope.launch {
-                                if (generation == turnGeneration) {
-                                    finishTurn(side, StopTrigger.SILENCE)
-                                }
-                            }
-                        },
+                        onSilenceAutoStop = onSilenceAutoStop,
                     )
-                } else {
-                    provider.start(language, onPartialResult = partialResultHandler)
+                    geminiLiveTranscribeProvider -> geminiLiveTranscribeProvider.start(
+                        language = language,
+                        silenceAutoStopSeconds = state.silenceAutoStopSeconds,
+                        onSilenceAutoStop = onSilenceAutoStop,
+                        onPartialResult = partialResultHandler,
+                    )
+                    else -> provider.start(language, onPartialResult = partialResultHandler)
                 }
                 if (state.sttEngine == SttEngine.SYSTEM) {
                     diagnostics.event(
@@ -599,6 +632,451 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    private fun startLiveMode(initialSpeakerSide: LanguageSide) {
+        val state = _uiState.value
+        if (state.status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR)) return
+        if (state.layoutMode != LayoutMode.CONVERSATION) return
+        if (!state.sttEngine.supportsConversationLive()) {
+            showError(
+                IllegalStateException(
+                    "Conversation Live requires Groq Whisper or Gemini 3.5 Transcribe Live " +
+                        "recognition. Select one in Settings.",
+                ),
+            )
+            return
+        }
+        if (state.translationEngine != TranslationEngine.GEMINI) {
+            showError(
+                IllegalStateException(
+                    "Conversation Live requires a Gemini translation model. " +
+                        "Select Gemini Flash in Settings.",
+                ),
+            )
+            return
+        }
+        if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+            showError(IllegalStateException("Gemini API key is not configured in this build."))
+            return
+        }
+        if (state.sttEngine == SttEngine.GROQ && BuildConfig.GROQ_API_KEY.isBlank()) {
+            showError(IllegalStateException("Groq API key is not configured in this build."))
+            return
+        }
+
+        val generation = ++turnGeneration
+        livePreviousSpeaker = initialSpeakerSide
+        systemTtsProvider.stop()
+        val initialSourceLanguage = state.languageFor(initialSpeakerSide)
+        val initialTargetLanguage = state.languageFor(initialSpeakerSide.otherSide())
+        diagnostics.beginLiveSession(
+            mapOf(
+                "mode" to "conversation_live",
+                "language_a" to state.languageA.canonicalName,
+                "language_b" to state.languageB.canonicalName,
+                "initial_fallback_source_side" to initialSpeakerSide.name.lowercase(),
+                "initial_fallback_source_language" to initialSourceLanguage.canonicalName,
+                "initial_fallback_target_language" to initialTargetLanguage.canonicalName,
+                "requested_stt" to state.sttEngine.name.lowercase(),
+                "stt_model" to when (state.sttEngine) {
+                    SttEngine.GROQ -> GROQ_STT_MODEL
+                    SttEngine.GEMINI_TRANSCRIBE_LIVE -> GEMINI_TRANSCRIBE_LIVE_MODEL
+                    else -> "unsupported"
+                },
+                "translation_engine" to "gemini",
+                "translation_model" to state.geminiModel.id,
+                "playback_engine" to "android_system_tts",
+                "silence_auto_stop_seconds" to state.silenceAutoStopSeconds.toString(),
+            ),
+        )
+        _uiState.update {
+            it.copy(
+                status = VoiceStatus.RECOGNIZING,
+                liveModeActive = true,
+                activeSide = null,
+                partialTranscriptSide = null,
+                textA = "",
+                textB = "",
+                resultSide = null,
+                elapsedSeconds = 0,
+                error = null,
+                hasLastDiagnostics = true,
+            )
+        }
+        liveJob?.cancel()
+        liveJob = viewModelScope.launch {
+            try {
+                while (generation == turnGeneration && _uiState.value.liveModeActive) {
+                    runLiveCycle(generation)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (throwable: Throwable) {
+                activeSttProvider?.cancel()
+                if (generation == turnGeneration) {
+                    activeSttProvider = null
+                    showError(throwable)
+                }
+            }
+        }
+    }
+
+    private suspend fun runLiveCycle(generation: Long) {
+        val snapshot = _uiState.value
+        if (generation != turnGeneration || !snapshot.liveModeActive) return
+        val fallbackSide = livePreviousSpeaker ?: LanguageSide.B
+        val fallbackLanguage = if (fallbackSide == LanguageSide.A) {
+            snapshot.languageA
+        } else {
+            snapshot.languageB
+        }
+        val fallbackTarget = if (fallbackSide == LanguageSide.A) {
+            snapshot.languageB
+        } else {
+            snapshot.languageA
+        }
+        diagnostics.beginLiveCycle(
+            mapOf(
+                "fallback_source_side" to fallbackSide.name.lowercase(),
+                "fallback_source_language" to fallbackLanguage.canonicalName,
+                "fallback_target_language" to fallbackTarget.canonicalName,
+            ),
+        )
+        val silenceDetected = CompletableDeferred<Unit>()
+        val liveProvider = when (snapshot.sttEngine) {
+            SttEngine.GROQ -> groqProvider
+            SttEngine.GEMINI_TRANSCRIBE_LIVE -> geminiLiveTranscribeProvider
+            else -> error(
+                "Conversation Live requires Groq Whisper or Gemini 3.5 Transcribe Live " +
+                    "recognition.",
+            )
+        }
+        activeSttProvider = liveProvider
+        recordingStartedAtMs = SystemClock.elapsedRealtime()
+        _uiState.update {
+            it.copy(
+                status = VoiceStatus.LISTENING,
+                activeSide = null,
+                partialTranscriptSide = null,
+                elapsedSeconds = 0,
+                error = null,
+                hasLastDiagnostics = true,
+            )
+        }
+        startTimer()
+        when (liveProvider) {
+            groqProvider -> groqProvider.startLive(
+                silenceAutoStopSeconds = snapshot.silenceAutoStopSeconds,
+                onSilenceAutoStop = { silenceDetected.complete(Unit) },
+            )
+            geminiLiveTranscribeProvider -> geminiLiveTranscribeProvider.startLive(
+                languageA = snapshot.languageA,
+                languageB = snapshot.languageB,
+                silenceAutoStopSeconds = snapshot.silenceAutoStopSeconds,
+                onSilenceAutoStop = { silenceDetected.complete(Unit) },
+                onPartialResult = partial@{ partial ->
+                    if (generation != turnGeneration || partial.isBlank()) return@partial
+                    diagnostics.event(
+                        "recognition_partial",
+                        mapOf(
+                            "stt_engine" to snapshot.sttEngine.name.lowercase(),
+                            "text" to partial,
+                            "text_characters" to partial.length.toString(),
+                            "display_side_hint" to fallbackSide.name.lowercase(),
+                        ),
+                    )
+                    _uiState.update { current ->
+                        if (fallbackSide == LanguageSide.A) {
+                            current.copy(textA = partial, textB = "", partialTranscriptSide = fallbackSide)
+                        } else {
+                            current.copy(textA = "", textB = partial, partialTranscriptSide = fallbackSide)
+                        }
+                    }
+                },
+            )
+            else -> error("Unsupported Live recognition provider.")
+        }
+        diagnostics.event(
+            "recording_started",
+            mapOf(
+                "stt_engine" to snapshot.sttEngine.name.lowercase(),
+                "language" to if (snapshot.sttEngine == SttEngine.GROQ) {
+                    "auto"
+                } else {
+                    listOf(snapshot.languageA.bcp47, snapshot.languageB.bcp47).joinToString(",")
+                },
+            ),
+        )
+        silenceDetected.await()
+        if (generation != turnGeneration) return
+
+        timerJob?.cancel()
+        _uiState.update { it.copy(status = VoiceStatus.RECOGNIZING) }
+        val stoppedAt = SystemClock.elapsedRealtime()
+        diagnostics.event(
+            "silence_auto_stop",
+            mapOf(
+                "recording_duration_ms" to
+                    (stoppedAt - recordingStartedAtMs).coerceAtLeast(0L).toString(),
+            ),
+        )
+        val groqRecognition = if (liveProvider === groqProvider) {
+            groqProvider.stopWithLanguageDetection()
+        } else {
+            null
+        }
+        val geminiLiveTranscript = if (liveProvider === geminiLiveTranscribeProvider) {
+            geminiLiveTranscribeProvider.stop()
+        } else {
+            null
+        }
+        val transcript = groqRecognition?.text
+            ?: geminiLiveTranscript
+            ?: error("Live recognition returned no result.")
+        activeSttProvider = null
+        logTiming(
+            "stt_final_after_silence",
+            SystemClock.elapsedRealtime() - stoppedAt,
+        )
+        if (generation != turnGeneration) return
+
+        diagnostics.event(
+            "recognition_final",
+            mapOf(
+                "stt_engine" to snapshot.sttEngine.name.lowercase(),
+                "text" to transcript,
+                "text_characters" to transcript.length.toString(),
+                "reported_language" to
+                    (groqRecognition?.detectedLanguage ?: "not_provided_by_gemini_live"),
+                "language_candidates" to
+                    listOf(snapshot.languageA.bcp47, snapshot.languageB.bcp47).joinToString(","),
+            ) + pairLanguageDiagnosticFeatures(transcript),
+        )
+
+        _uiState.update { it.copy(status = VoiceStatus.TRANSLATING) }
+        val translationStartedAt = SystemClock.elapsedRealtime()
+        val route = if (groqRecognition != null) {
+            val detectedLanguage = mapLiveDetectedLanguage(groqRecognition.detectedLanguage)
+            val sourceSide = resolveLiveSpeakerSide(
+                detectedLanguage = detectedLanguage,
+                languageA = snapshot.languageA,
+                languageB = snapshot.languageB,
+                fallbackSide = fallbackSide,
+            )
+            val targetSide = sourceSide.otherSide()
+            val sourceLanguage = snapshot.languageFor(sourceSide)
+            val targetLanguage = snapshot.languageFor(targetSide)
+            val displayTranscript = liveTranscriptForDisplay(
+                transcript = transcript,
+                detectedLanguage = detectedLanguage,
+                configuredLanguage = sourceLanguage,
+            )
+            diagnostics.event(
+                "live_language_resolved",
+                mapOf(
+                    "detected_language" to groqRecognition.detectedLanguage,
+                    "mapped_language" to detectedLanguage.canonicalName,
+                    "source_side" to sourceSide.name.lowercase(),
+                    "target_language" to targetLanguage.code,
+                ),
+            )
+            _uiState.update { current ->
+                if (sourceSide == LanguageSide.A) {
+                    current.copy(textA = displayTranscript, textB = "", resultSide = null)
+                } else {
+                    current.copy(textA = "", textB = displayTranscript, resultSide = null)
+                }
+            }
+            diagnostics.event(
+                "translation_requested",
+                mapOf(
+                    "prompt_mode" to "detected_language_live",
+                    "source_language" to sourceLanguage.canonicalName,
+                    "source_code" to sourceLanguage.code,
+                    "target_language" to targetLanguage.canonicalName,
+                    "target_code" to targetLanguage.code,
+                    "input_text" to transcript,
+                ),
+            )
+            val translation = geminiTranslationProvider.translate(
+                apiKey = BuildConfig.GEMINI_API_KEY,
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                transcript = transcript,
+                geminiModel = snapshot.geminiModel,
+                serbianScript = snapshot.serbianScript,
+                liveSourceLanguage = detectedLanguage.canonicalName,
+            )
+            LiveTranslationRoute(sourceSide, translation)
+        } else if (geminiLiveTranscript != null) {
+            diagnostics.event(
+                "pair_classification_started",
+                mapOf(
+                    "reason" to "gemini_live_text_only",
+                    "candidate_a" to snapshot.languageA.bcp47,
+                    "candidate_b" to snapshot.languageB.bcp47,
+                    "text" to transcript,
+                ) + pairLanguageDiagnosticFeatures(transcript),
+            )
+            val pairDecision = pairLanguageClassifier.classify(
+                text = transcript,
+                languageA = snapshot.languageA,
+                languageB = snapshot.languageB,
+            )
+            val sourceLanguage = pairDecision.language
+            val sourceSide = if (sourceLanguage == snapshot.languageA) {
+                LanguageSide.A
+            } else {
+                LanguageSide.B
+            }
+            val targetLanguage = snapshot.languageFor(sourceSide.otherSide())
+            diagnostics.event(
+                "live_language_resolved",
+                mapOf(
+                    "detected_language" to "local_pair_classifier",
+                    "mapped_language" to sourceLanguage.canonicalName,
+                    "source_side" to sourceSide.name.lowercase(),
+                    "target_language" to targetLanguage.code,
+                    "resolution_method" to pairDecision.method,
+                    "classifier_evidence" to pairDecision.evidence,
+                    "pair_score_a" to pairDecision.scoreA.toString(),
+                    "pair_score_b" to pairDecision.scoreB.toString(),
+                    "language_candidates" to
+                        listOf(snapshot.languageA.bcp47, snapshot.languageB.bcp47).joinToString(","),
+                ),
+            )
+            _uiState.update { current ->
+                if (sourceSide == LanguageSide.A) {
+                    current.copy(
+                        textA = transcript,
+                        textB = "",
+                        resultSide = null,
+                        partialTranscriptSide = null,
+                    )
+                } else {
+                    current.copy(
+                        textA = "",
+                        textB = transcript,
+                        resultSide = null,
+                        partialTranscriptSide = null,
+                    )
+                }
+            }
+            diagnostics.event(
+                "translation_requested",
+                mapOf(
+                    "prompt_mode" to "standard_directional",
+                    "source_language" to sourceLanguage.canonicalName,
+                    "source_code" to sourceLanguage.code,
+                    "target_language" to targetLanguage.canonicalName,
+                    "target_code" to targetLanguage.code,
+                    "input_text" to transcript,
+                ),
+            )
+            val translation = geminiTranslationProvider.translate(
+                apiKey = BuildConfig.GEMINI_API_KEY,
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                transcript = transcript,
+                geminiModel = snapshot.geminiModel,
+                serbianScript = snapshot.serbianScript,
+            )
+            LiveTranslationRoute(sourceSide, translation)
+        } else {
+            error("Live recognition returned no language result.")
+        }
+        val sourceSide = route.sourceSide
+        val targetSide = sourceSide.otherSide()
+        val translated = route.translation
+        val targetLanguage = translated.targetLanguage
+        livePreviousSpeaker = sourceSide
+        logTiming(
+            "translation_gemini_live",
+            SystemClock.elapsedRealtime() - translationStartedAt,
+        )
+        diagnostics.event(
+            "translation_completed",
+            mapOf(
+                "source_language" to translated.sourceLanguage.canonicalName,
+                "source_code" to translated.sourceLanguage.code,
+                "target_language" to translated.targetLanguage.canonicalName,
+                "target_code" to translated.targetLanguage.code,
+                "translated_text" to translated.translatedText,
+                "translation_characters" to translated.translatedText.length.toString(),
+            ),
+        )
+        if (generation != turnGeneration) return
+        _uiState.update { current ->
+            if (targetSide == LanguageSide.A) {
+                current.copy(textA = translated.translatedText, resultSide = targetSide)
+            } else {
+                current.copy(textB = translated.translatedText, resultSide = targetSide)
+            }
+        }
+
+        _uiState.update { it.copy(status = VoiceStatus.SPEAKING) }
+        val playbackRequestedAt = SystemClock.elapsedRealtime()
+        diagnostics.event(
+            "playback_requested",
+            mapOf(
+                "language" to targetLanguage.canonicalName,
+                "language_code" to targetLanguage.code,
+                "locale" to targetLanguage.bcp47,
+                "text" to translated.translatedText,
+            ),
+        )
+        systemTtsProvider.speak(translated.translatedText, targetLanguage) {
+            diagnostics.event(
+                "android_tts_service_selected",
+                mapOf(
+                    "provider" to systemTtsProvider.activeServiceName(),
+                    "requested_language" to targetLanguage.canonicalName,
+                    "requested_locale" to targetLanguage.bcp47,
+                    "voice_name" to systemTtsProvider.activeVoiceName(),
+                    "voice_locale" to systemTtsProvider.activeVoiceLocaleTag(),
+                ),
+            )
+            logTiming("playback_start", SystemClock.elapsedRealtime() - playbackRequestedAt)
+            logTiming(
+                "silence_stop_to_playback_start",
+                SystemClock.elapsedRealtime() - stoppedAt,
+            )
+        }
+        logTiming("playback_total", SystemClock.elapsedRealtime() - playbackRequestedAt)
+        if (generation != turnGeneration) return
+        diagnostics.finishLiveCycle("completed")
+        _uiState.update {
+            it.copy(status = VoiceStatus.RECOGNIZING, activeSide = null, elapsedSeconds = 0)
+        }
+    }
+
+    private fun stopLiveMode() {
+        val state = _uiState.value
+        if (!state.liveModeActive) return
+        turnGeneration += 1
+        liveJob?.cancel()
+        liveJob = null
+        timerJob?.cancel()
+        activeSttProvider?.cancel()
+        activeSttProvider = null
+        systemTtsProvider.stop()
+        livePreviousSpeaker = null
+        diagnostics.event(
+            "live_stopped_by_user",
+            mapOf("phase" to state.status.name.lowercase()),
+        )
+        diagnostics.finishLiveSession("stopped_by_user")
+        _uiState.update {
+            it.copy(
+                status = VoiceStatus.READY,
+                liveModeActive = false,
+                activeSide = null,
+                partialTranscriptSide = null,
+                elapsedSeconds = 0,
+                error = null,
+            )
+        }
+    }
+
     private fun startTimer() {
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
@@ -622,6 +1100,9 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
             SttEngine.GROQ -> if (BuildConfig.GROQ_API_KEY.isBlank()) {
                 error("Groq API key is not configured in this build.")
             }
+            SttEngine.GEMINI_TRANSCRIBE_LIVE -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+                error("Gemini API key is not configured in this build.")
+            }
             SttEngine.WHISPER_OFFLINE -> {
                 if (!state.whisperRuntimeAvailable) error(WHISPER_RUNTIME_MESSAGE)
                 if (state.whisperModelStatus !is OfflineModelStatus.Installed) {
@@ -634,6 +1115,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
     private fun sttProviderFor(engine: SttEngine): SttProvider = when (engine) {
         SttEngine.SYSTEM -> systemProvider
         SttEngine.GROQ -> groqProvider
+        SttEngine.GEMINI_TRANSCRIBE_LIVE -> geminiLiveTranscribeProvider
         SttEngine.WHISPER_OFFLINE -> whisperProvider
     }
 
@@ -643,6 +1125,7 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update {
             it.copy(
                 status = VoiceStatus.ERROR,
+                liveModeActive = false,
                 activeSide = null,
                 partialTranscriptSide = null,
                 elapsedSeconds = 0,
@@ -660,10 +1143,13 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
 
     override fun onCleared() {
         timerJob?.cancel()
+        liveJob?.cancel()
         languagePackJob?.cancel()
         activeSttProvider?.cancel()
         systemProvider.destroy()
         groqProvider.cancel()
+        geminiLiveTranscribeProvider.cancel()
+        pairLanguageClassifier.close()
         systemTtsProvider.release()
         runBlocking { whisperProvider.release() }
         offlineTranslationProvider.close()
@@ -721,6 +1207,21 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         const val WHISPER_RUNTIME_MESSAGE =
             "Whisper Offline requires a 64-bit ARM Android phone."
     }
+}
+
+private data class LiveTranslationRoute(
+    val sourceSide: LanguageSide,
+    val translation: TranslationResult,
+)
+
+private fun LanguageSide.otherSide(): LanguageSide = when (this) {
+    LanguageSide.A -> LanguageSide.B
+    LanguageSide.B -> LanguageSide.A
+}
+
+private fun TranslatorUiState.languageFor(side: LanguageSide): AppLanguage = when (side) {
+    LanguageSide.A -> languageA
+    LanguageSide.B -> languageB
 }
 
 private enum class StopTrigger(

@@ -45,6 +45,7 @@ enum class SerbianScript(val label: String, val targetToken: String) {
 enum class SttEngine(val label: String, val progressLabel: String) {
     SYSTEM("Android Speech", "Android"),
     GROQ("Groq Whisper", "Groq Whisper"),
+    GEMINI_TRANSCRIBE_LIVE("Gemini 3.5 Transcribe Live", "Gemini Live STT"),
     WHISPER_OFFLINE("Whisper Offline", "Whisper Offline"),
 }
 
@@ -106,7 +107,7 @@ data class TranslatorUiState(
     val layoutMode: LayoutMode = LayoutMode.SINGLE,
     val geminiModel: GeminiTranslationModel = GeminiTranslationModel.FLASH_3_5_LITE,
     val translationEngine: TranslationEngine = TranslationEngine.GEMINI,
-    val sttEngine: SttEngine = SttEngine.GROQ,
+    val sttEngine: SttEngine = SttEngine.GEMINI_TRANSCRIBE_LIVE,
     val serbianScript: SerbianScript = SerbianScript.LATIN,
     val offlineModelStatus: OfflineModelStatus = OfflineModelStatus.NotInstalled,
     val offlineModelDownloadSizeLabel: String = "",
@@ -117,6 +118,7 @@ data class TranslatorUiState(
     val androidSttLanguagePacks: Map<AppLanguage, AndroidLanguagePackStatus> = emptyMap(),
     val androidTtsLanguagePacks: Map<AppLanguage, AndroidLanguagePackStatus> = emptyMap(),
     val status: VoiceStatus = VoiceStatus.READY,
+    val liveModeActive: Boolean = false,
     val activeSide: LanguageSide? = null,
     val partialTranscriptSide: LanguageSide? = null,
     val textA: String = "",
@@ -129,6 +131,7 @@ data class TranslatorUiState(
 )
 
 const val GROQ_STT_MODEL = "whisper-large-v3"
+const val GEMINI_TRANSCRIBE_LIVE_MODEL = "gemini-3.5-transcribe-live"
 const val WHISPER_OFFLINE_MODEL = "large-v3-turbo-q4_0"
 const val PLAYBACK_PROGRESS_LABEL = "Android"
 const val DEFAULT_SILENCE_AUTO_STOP_SECONDS = 2f
@@ -166,6 +169,10 @@ internal fun silenceAutoStopDurationMs(seconds: Float): Long =
 
 fun SttEngine.isWhisperOffline(): Boolean =
     this == SttEngine.WHISPER_OFFLINE
+
+fun SttEngine.supportsConversationLive(): Boolean =
+    this == SttEngine.GROQ ||
+        this == SttEngine.GEMINI_TRANSCRIBE_LIVE
 
 fun isOfflineSlavicDirection(languageA: AppLanguage, languageB: AppLanguage): Boolean =
     (languageA == AppLanguage.RUSSIAN &&

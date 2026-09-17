@@ -24,7 +24,11 @@ class OfflineOpusTranslationProvider(
         transcript: String,
         geminiModel: GeminiTranslationModel,
         serbianScript: SerbianScript,
+        liveSourceLanguage: String?,
     ): TranslationResult = withContext(Dispatchers.IO) {
+        require(liveSourceLanguage == null) {
+            "Conversation Live requires a Gemini translation model."
+        }
         require(modelManager.supports(sourceLanguage, targetLanguage)) {
             "${modelManager.manifest.displayName} does not support this language pair. " +
                 "Choose a compatible offline or cloud model."

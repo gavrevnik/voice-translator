@@ -19,6 +19,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
@@ -31,7 +32,8 @@ class GroqWhisperSttProvider(
     private val diagnosticEvent: DiagnosticEvent = { _, _ -> },
 ) : SttProvider {
     private val recorder = PcmWavRecorder()
-    private var language = AppLanguage.ENGLISH
+    private val activeHttpCall = AtomicReference<okhttp3.Call?>()
+    private var requestedLanguageCode: String? = AppLanguage.ENGLISH.whisperCode
 
     override suspend fun start(language: AppLanguage, onPartialResult: (String) -> Unit) {
         start(
@@ -46,17 +48,47 @@ class GroqWhisperSttProvider(
         silenceAutoStopSeconds: Float,
         onSilenceAutoStop: () -> Unit,
     ) {
+        startRecording(
+            languageCode = language.whisperCode,
+            silenceAutoStopSeconds = silenceAutoStopSeconds,
+            onSilenceAutoStop = onSilenceAutoStop,
+        )
+    }
+
+    suspend fun startLive(
+        silenceAutoStopSeconds: Float,
+        onSilenceAutoStop: () -> Unit,
+    ) {
+        startRecording(
+            languageCode = null,
+            silenceAutoStopSeconds = silenceAutoStopSeconds,
+            onSilenceAutoStop = onSilenceAutoStop,
+        )
+    }
+
+    private fun startRecording(
+        languageCode: String?,
+        silenceAutoStopSeconds: Float,
+        onSilenceAutoStop: () -> Unit,
+    ) {
         if (BuildConfig.GROQ_API_KEY.isBlank()) {
             error("Groq API key is not configured in this build.")
         }
-        this.language = language
+        requestedLanguageCode = languageCode
         recorder.start(
             silenceDurationMs = silenceAutoStopDurationMs(silenceAutoStopSeconds),
             onSilenceDetected = onSilenceAutoStop,
         )
     }
 
-    override suspend fun stop(): String = withContext(Dispatchers.IO) {
+    override suspend fun stop(): String = finishTranscription(requireDetectedLanguage = false).text
+
+    suspend fun stopWithLanguageDetection(): GroqTranscription =
+        finishTranscription(requireDetectedLanguage = true)
+
+    private suspend fun finishTranscription(
+        requireDetectedLanguage: Boolean,
+    ): GroqTranscription = withContext(Dispatchers.IO) {
         val recording = recorder.stop()
         val wav = recording.wav
         if (wav.size > MAX_AUDIO_BYTES) {
@@ -67,13 +99,15 @@ class GroqWhisperSttProvider(
             mapOf(
                 "captured_audio_ms" to recording.capturedDurationMs.toString(),
                 "uploaded_audio_ms" to recording.uploadedDurationMs.toString(),
-                "trimmed_trailing_silence_ms" to recording.trimmedDurationMs.toString(),
-                "auto_stop_trim_applied" to (recording.trimmedDurationMs > 0).toString(),
+                "trimmed_leading_silence_ms" to recording.trimmedLeadingDurationMs.toString(),
+                "trimmed_trailing_silence_ms" to recording.trimmedTrailingDurationMs.toString(),
+                "silence_trim_applied" to
+                    (recording.trimmedTrailingDurationMs > 0).toString(),
                 "post_roll_ms" to GROQ_AUTO_STOP_POST_ROLL_MS.toString(),
             ),
         )
 
-        val requestBody = MultipartBody.Builder()
+        val requestBodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart(
                 "file",
@@ -81,11 +115,13 @@ class GroqWhisperSttProvider(
                 wav.toRequestBody(WAV_MEDIA_TYPE),
             )
             .addFormDataPart("model", GROQ_STT_MODEL)
-            .addFormDataPart("language", language.whisperCode)
             .addFormDataPart("response_format", "verbose_json")
             .addFormDataPart("timestamp_granularities[]", "segment")
             .addFormDataPart("temperature", "0")
-            .build()
+        requestedLanguageCode?.let { languageCode ->
+            requestBodyBuilder.addFormDataPart("language", languageCode)
+        }
+        val requestBody = requestBodyBuilder.build()
         val request = Request.Builder()
             .url(TRANSCRIPTIONS_URL)
             .header("Authorization", "Bearer ${BuildConfig.GROQ_API_KEY}")
@@ -93,32 +129,49 @@ class GroqWhisperSttProvider(
             .build()
 
         val startedAt = SystemClock.elapsedRealtime()
-        client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            Log.i(
-                TIMING_TAG,
-                "stage=groq_whisper_large_v3 duration_ms=" +
-                    "${SystemClock.elapsedRealtime() - startedAt} audio_bytes=${wav.size}",
-            )
-            val payload = runCatching { JSONObject(body) }.getOrNull()
-            if (!response.isSuccessful) {
-                val message = payload
-                    ?.optJSONObject("error")
-                    ?.optString("message")
-                    .orEmpty()
-                throw IOException(message.ifBlank { "Groq API returned HTTP ${response.code}." })
-            }
+        val call = client.newCall(request)
+        activeHttpCall.set(call)
+        try {
+            call.execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                Log.i(
+                    TIMING_TAG,
+                    "stage=groq_whisper_large_v3 duration_ms=" +
+                        "${SystemClock.elapsedRealtime() - startedAt} audio_bytes=${wav.size}",
+                )
+                val payload = runCatching { JSONObject(body) }.getOrNull()
+                if (!response.isSuccessful) {
+                    val message = payload
+                        ?.optJSONObject("error")
+                        ?.optString("message")
+                        .orEmpty()
+                    throw IOException(
+                        message.ifBlank { "Groq API returned HTTP ${response.code}." },
+                    )
+                }
 
-            if (payload != null) recordVerboseDiagnostics(payload)
-            val transcript = payload?.optString("text")?.trim().orEmpty()
-            transcript.ifBlank {
-                error("Groq Whisper returned an empty transcript.")
+                if (payload != null) recordVerboseDiagnostics(payload)
+                val transcript = payload?.optString("text")?.trim().orEmpty()
+                if (transcript.isBlank()) {
+                    error("Groq Whisper returned an empty transcript.")
+                }
+                val detectedLanguage = payload?.optString("language")?.trim().orEmpty()
+                if (requireDetectedLanguage && detectedLanguage.isBlank()) {
+                    error("Groq Whisper did not return a detected language.")
+                }
+                GroqTranscription(
+                    text = transcript,
+                    detectedLanguage = detectedLanguage,
+                )
             }
+        } finally {
+            activeHttpCall.compareAndSet(call, null)
         }
     }
 
     override fun cancel() {
         recorder.cancel()
+        activeHttpCall.getAndSet(null)?.cancel()
     }
 
     private fun recordVerboseDiagnostics(payload: JSONObject) {
@@ -130,7 +183,7 @@ class GroqWhisperSttProvider(
         }
         val fields = linkedMapOf(
             "response_format" to "verbose_json",
-            "requested_language" to language.whisperCode,
+            "requested_language" to (requestedLanguageCode ?: "auto"),
             "detected_language" to payload.optString("language", "unknown"),
             "segment_count" to segmentObjects.size.toString(),
         )
@@ -179,13 +232,14 @@ internal class PcmWavRecorder {
     private var audioRecord: AudioRecord? = null
     private var worker: Thread? = null
     private var failure: Throwable? = null
-    private var output = ByteArrayOutputStream()
+    private var speechWriter: SpeechOnlyPcmWriter? = null
     @Volatile private var autoStopCutPcmBytes: Int? = null
 
     @SuppressLint("MissingPermission")
     fun start(
         silenceDurationMs: Long,
         onSilenceDetected: () -> Unit,
+        onPcmChunk: (ByteArray) -> Unit = {},
     ) {
         check(!recording) { "Recording is already active." }
         val minBufferSize = AudioRecord.getMinBufferSize(
@@ -206,7 +260,6 @@ internal class PcmWavRecorder {
             "Could not initialize the microphone."
         }
 
-        output = ByteArrayOutputStream()
         failure = null
         autoStopCutPcmBytes = null
         audioRecord = recorder
@@ -216,13 +269,16 @@ internal class PcmWavRecorder {
             sampleRate = SAMPLE_RATE,
             silenceDurationMs = silenceDurationMs,
         )
+        val writer = SpeechOnlyPcmWriter(pauseDetector)
+        speechWriter = writer
         worker = Thread(
             {
                 captureLoop(
                     recorder = recorder,
                     minBufferSize = minBufferSize,
-                    pauseDetector = pauseDetector,
+                    speechWriter = writer,
                     onSilenceDetected = onSilenceDetected,
+                    onPcmChunk = onPcmChunk,
                 )
             },
             "SayItGroqRecorder",
@@ -239,22 +295,32 @@ internal class PcmWavRecorder {
         audioRecord = null
         failure?.let { throw it }
 
-        val capturedPcm = output.toByteArray()
-        if (capturedPcm.isEmpty()) error("No audio was recorded.")
-        val cutByteCount = autoStopCutPcmBytes
-            ?.coerceIn(PCM16_BYTES_PER_SAMPLE, capturedPcm.size)
-            ?: capturedPcm.size
-        val uploadPcm = if (cutByteCount < capturedPcm.size) {
-            capturedPcm.copyOf(cutByteCount)
+        val writer = speechWriter ?: error("No recording is in progress.")
+        val speechPcm = writer.speechPcm()
+        if (writer.capturedPcmBytes == 0) error("No audio was recorded.")
+        if (speechPcm.isEmpty()) error("No speech was detected.")
+        val cutByteCount = (
+            autoStopCutPcmBytes ?: autoStopPcmCutByteCount(
+                capturedBytesAtDetection = speechPcm.size,
+                trailingSilenceSamples = writer.trailingSilenceSamples,
+                sampleRate = SAMPLE_RATE,
+                postRollMs = GROQ_AUTO_STOP_POST_ROLL_MS,
+            )
+            ).coerceIn(PCM16_BYTES_PER_SAMPLE, speechPcm.size)
+        val uploadPcm = if (cutByteCount < speechPcm.size) {
+            speechPcm.copyOf(cutByteCount)
         } else {
-            capturedPcm
+            speechPcm
         }
-        return GroqRecordedAudio(
+        val recordedAudio = GroqRecordedAudio(
             wav = encodePcm16Wav(uploadPcm, SAMPLE_RATE),
-            capturedPcmBytes = capturedPcm.size,
+            capturedPcmBytes = writer.capturedPcmBytes,
+            speechPcmBytes = speechPcm.size,
             uploadedPcmBytes = uploadPcm.size,
             sampleRate = SAMPLE_RATE,
         )
+        speechWriter = null
+        return recordedAudio
     }
 
     fun cancel() {
@@ -264,33 +330,27 @@ internal class PcmWavRecorder {
         worker = null
         audioRecord?.release()
         audioRecord = null
-        output.reset()
+        speechWriter = null
         autoStopCutPcmBytes = null
     }
 
     private fun captureLoop(
         recorder: AudioRecord,
         minBufferSize: Int,
-        pauseDetector: SpeechPauseDetector,
+        speechWriter: SpeechOnlyPcmWriter,
         onSilenceDetected: () -> Unit,
+        onPcmChunk: (ByteArray) -> Unit,
     ) {
         val samples = ShortArray(minBufferSize.coerceAtLeast(2) / 2)
-        val bytes = ByteArray(samples.size * 2)
         try {
             while (recording) {
                 val count = recorder.read(samples, 0, samples.size)
                 if (count < 0) error("Microphone read failed with code $count.")
-                var byteIndex = 0
-                for (index in 0 until count) {
-                    val sample = samples[index].toInt()
-                    bytes[byteIndex++] = (sample and 0xff).toByte()
-                    bytes[byteIndex++] = ((sample shr 8) and 0xff).toByte()
-                }
-                output.write(bytes, 0, count * 2)
-                if (pauseDetector.accept(samples, count)) {
+                if (count > 0) onPcmChunk(pcm16Bytes(samples, count))
+                if (speechWriter.accept(samples, count)) {
                     autoStopCutPcmBytes = autoStopPcmCutByteCount(
-                        capturedBytesAtDetection = output.size(),
-                        trailingSilenceSamples = pauseDetector.trailingSilenceSamples,
+                        capturedBytesAtDetection = speechWriter.speechPcmByteCount,
+                        trailingSilenceSamples = speechWriter.trailingSilenceSamples,
                         sampleRate = SAMPLE_RATE,
                         postRollMs = GROQ_AUTO_STOP_POST_ROLL_MS,
                     )
@@ -308,6 +368,57 @@ internal class PcmWavRecorder {
         const val SAMPLE_RATE = 16_000
         const val TIMING_TAG = "SayItTiming"
     }
+}
+
+internal class SpeechOnlyPcmWriter(
+    private val pauseDetector: SpeechPauseDetector,
+) {
+    private val output = ByteArrayOutputStream()
+    private val pendingSpeech = ByteArrayOutputStream()
+
+    var capturedPcmBytes: Int = 0
+        private set
+
+    val speechPcmByteCount: Int
+        get() = output.size()
+
+    val trailingSilenceSamples: Long
+        get() = pauseDetector.trailingSilenceSamples
+
+    fun accept(samples: ShortArray, count: Int): Boolean {
+        require(count in 0..samples.size)
+        if (count == 0) return false
+        val bytes = pcm16Bytes(samples, count)
+        capturedPcmBytes += bytes.size
+        val speechAlreadyStarted = pauseDetector.hasSpeechStarted
+        val shouldAutoStop = pauseDetector.accept(samples, count)
+        when {
+            speechAlreadyStarted -> output.write(bytes)
+            pauseDetector.hasSpeechStarted -> {
+                pendingSpeech.write(bytes)
+                pendingSpeech.writeTo(output)
+                pendingSpeech.reset()
+            }
+            pauseDetector.hasPotentialSpeech -> pendingSpeech.write(bytes)
+            else -> pendingSpeech.reset()
+        }
+        return shouldAutoStop
+    }
+
+    fun speechPcm(): ByteArray = output.toByteArray()
+
+}
+
+internal fun pcm16Bytes(samples: ShortArray, count: Int): ByteArray {
+    require(count in 0..samples.size)
+    val bytes = ByteArray(count * PCM16_BYTES_PER_SAMPLE)
+    var byteIndex = 0
+    for (index in 0 until count) {
+        val sample = samples[index].toInt()
+        bytes[byteIndex++] = (sample and 0xff).toByte()
+        bytes[byteIndex++] = ((sample shr 8) and 0xff).toByte()
+    }
+    return bytes
 }
 
 internal class SpeechPauseDetector(
@@ -329,6 +440,12 @@ internal class SpeechPauseDetector(
     private var consecutiveSilenceSamples = 0L
     private var speechStarted = false
     private var autoStopTriggered = false
+
+    val hasSpeechStarted: Boolean
+        get() = speechStarted
+
+    val hasPotentialSpeech: Boolean
+        get() = !speechStarted && consecutiveSpeechSamples > 0L
 
     val trailingSilenceSamples: Long
         get() = consecutiveSilenceSamples
@@ -386,6 +503,7 @@ internal class SpeechPauseDetector(
 internal data class GroqRecordedAudio(
     val wav: ByteArray,
     val capturedPcmBytes: Int,
+    val speechPcmBytes: Int,
     val uploadedPcmBytes: Int,
     val sampleRate: Int,
 ) {
@@ -395,9 +513,23 @@ internal data class GroqRecordedAudio(
     val uploadedDurationMs: Long
         get() = pcmBytesToMilliseconds(uploadedPcmBytes, sampleRate)
 
-    val trimmedDurationMs: Long
-        get() = (capturedDurationMs - uploadedDurationMs).coerceAtLeast(0L)
+    val trimmedLeadingDurationMs: Long
+        get() = pcmBytesToMilliseconds(
+            (capturedPcmBytes - speechPcmBytes).coerceAtLeast(0),
+            sampleRate,
+        )
+
+    val trimmedTrailingDurationMs: Long
+        get() = pcmBytesToMilliseconds(
+            (speechPcmBytes - uploadedPcmBytes).coerceAtLeast(0),
+            sampleRate,
+        )
 }
+
+data class GroqTranscription(
+    val text: String,
+    val detectedLanguage: String,
+)
 
 internal fun autoStopPcmCutByteCount(
     capturedBytesAtDetection: Int,

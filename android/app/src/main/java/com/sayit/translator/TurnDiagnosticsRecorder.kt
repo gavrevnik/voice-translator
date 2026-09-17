@@ -14,10 +14,11 @@ import java.time.format.DateTimeFormatter
 internal typealias DiagnosticEvent = (String, Map<String, String>) -> Unit
 
 /**
- * Keeps a privacy-safe diagnostic trace for the most recent voice cycle.
+ * Keeps a diagnostic trace for the most recent normal voice cycle or the complete Conversation
+ * Live session between its Start and Stop button presses.
  *
- * Speech audio, source text, translated text, and API keys are deliberately never accepted by
- * this class. Callers should pass only engine names, timings, counts, and safe error details.
+ * Normal-cycle traces exclude text. Live traces intentionally include recognized and translated
+ * text to make language routing debuggable. Speech audio and API keys are never stored.
  */
 internal class TurnDiagnosticsRecorder(context: Context) {
     private val appContext = context.applicationContext
@@ -25,31 +26,40 @@ internal class TurnDiagnosticsRecorder(context: Context) {
     private val diagnosticsDirectory = File(appContext.filesDir, "diagnostics")
     private val lastCycleFile = File(diagnosticsDirectory, "last-cycle.log")
     private var active = false
+    private var traceMode = DiagnosticTraceMode.SINGLE_CYCLE
     private var startedAtElapsedMs = 0L
+    private var cycleStartedAtElapsedMs = 0L
+    private var liveCycleIndex = 0
+    private var liveCycleActive = false
 
     fun begin(fields: Map<String, String>) = synchronized(lock) {
-        diagnosticsDirectory.mkdirs()
-        startedAtElapsedMs = SystemClock.elapsedRealtime()
+        traceMode = DiagnosticTraceMode.SINGLE_CYCLE
+        liveCycleIndex = 0
+        liveCycleActive = false
         active = true
-        lastCycleFile.bufferedWriter(Charsets.UTF_8).use { writer ->
-            writer.appendLine("Say it — last voice cycle diagnostics")
-            writer.appendLine(
-                "privacy=No audio, recognized text, translation text, or API keys are included.",
-            )
-            writer.appendLine("session_started_utc=${Instant.now()}")
-            writer.appendLine("app_version=${BuildConfig.VERSION_NAME}")
-            writer.appendLine("app_version_code=${BuildConfig.VERSION_CODE}")
-            writer.appendLine("package=${BuildConfig.APPLICATION_ID}")
-            writer.appendLine("device=${sanitize(Build.MANUFACTURER)} ${sanitize(Build.MODEL)}")
-            writer.appendLine("android=${sanitize(Build.VERSION.RELEASE)} api=${Build.VERSION.SDK_INT}")
-            writer.appendLine("abis=${Build.SUPPORTED_ABIS.joinToString(",") { sanitize(it) }}")
-            fields.toSortedMap().forEach { (key, value) ->
-                writer.appendLine("${sanitizeKey(key)}=${sanitize(value)}")
-            }
-            writer.appendLine()
-            writer.appendLine("events:")
-            writer.appendLine(eventLine("cycle_started", emptyMap()))
+        writeHeader("Say it — last voice cycle diagnostics", fields, includesText = false)
+        appendLine(eventLine("cycle_started", emptyMap()))
+    }
+
+    fun beginLiveSession(fields: Map<String, String>) = synchronized(lock) {
+        traceMode = DiagnosticTraceMode.LIVE_SESSION
+        liveCycleIndex = 0
+        liveCycleActive = false
+        active = true
+        writeHeader("Say it — Conversation Live session diagnostics", fields, includesText = true)
+        appendLine(eventLine("live_session_started", emptyMap()))
+    }
+
+    fun beginLiveCycle(fields: Map<String, String>) = synchronized(lock) {
+        if (!active || traceMode != DiagnosticTraceMode.LIVE_SESSION) return@synchronized
+        if (liveCycleActive) {
+            appendLine(eventLine("cycle_finished", mapOf("outcome" to "superseded")))
         }
+        liveCycleIndex += 1
+        liveCycleActive = true
+        cycleStartedAtElapsedMs = SystemClock.elapsedRealtime()
+        appendLine("")
+        appendLine(eventLine("cycle_started", fields))
     }
 
     fun event(name: String, fields: Map<String, String> = emptyMap()) = synchronized(lock) {
@@ -59,21 +69,46 @@ internal class TurnDiagnosticsRecorder(context: Context) {
 
     fun finish(outcome: String) = synchronized(lock) {
         if (!active) return@synchronized
+        if (traceMode == DiagnosticTraceMode.LIVE_SESSION) {
+            finishLiveSessionLocked(outcome)
+            return@synchronized
+        }
         appendLine(eventLine("cycle_finished", mapOf("outcome" to outcome)))
         active = false
     }
 
+    fun finishLiveCycle(outcome: String) = synchronized(lock) {
+        if (
+            !active ||
+            traceMode != DiagnosticTraceMode.LIVE_SESSION ||
+            !liveCycleActive
+        ) {
+            return@synchronized
+        }
+        appendLine(eventLine("cycle_finished", mapOf("outcome" to outcome)))
+        liveCycleActive = false
+    }
+
+    fun finishLiveSession(outcome: String) = synchronized(lock) {
+        if (!active || traceMode != DiagnosticTraceMode.LIVE_SESSION) return@synchronized
+        finishLiveSessionLocked(outcome)
+    }
+
     fun fail(throwable: Throwable) = synchronized(lock) {
         if (!active) return@synchronized
-        appendLine(
-            eventLine(
-                "cycle_failed",
-                mapOf(
-                    "error_type" to throwable.javaClass.simpleName,
-                    "error_message" to (throwable.message ?: "Unknown error"),
-                ),
-            ),
+        val errorFields = mapOf(
+            "error_type" to throwable.javaClass.simpleName,
+            "error_message" to (throwable.message ?: "Unknown error"),
         )
+        if (traceMode == DiagnosticTraceMode.LIVE_SESSION) {
+            if (liveCycleActive) {
+                appendLine(eventLine("cycle_failed", errorFields))
+                liveCycleActive = false
+            }
+            appendLine(eventLine("live_session_failed", errorFields))
+        } else {
+            appendLine(eventLine("cycle_failed", errorFields))
+        }
         active = false
     }
 
@@ -88,7 +123,13 @@ internal class TurnDiagnosticsRecorder(context: Context) {
             if (file.isFile) file.delete()
         }
         val timestamp = SHARE_FILE_TIME_FORMATTER.format(Instant.now())
-        val sharedFile = File(sharedDirectory, "say-it-last-cycle-$timestamp.log")
+        val liveSession = lastFileIsLiveSession()
+        val filePrefix = if (liveSession) {
+            "say-it-live-session"
+        } else {
+            "say-it-last-cycle"
+        }
+        val sharedFile = File(sharedDirectory, "$filePrefix-$timestamp.log")
         lastCycleFile.copyTo(sharedFile, overwrite = true)
         val uri = FileProvider.getUriForFile(
             appContext,
@@ -98,7 +139,14 @@ internal class TurnDiagnosticsRecorder(context: Context) {
         Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "Say it — last voice cycle diagnostics")
+            putExtra(
+                Intent.EXTRA_SUBJECT,
+                if (liveSession) {
+                    "Say it — Conversation Live session diagnostics"
+                } else {
+                    "Say it — last voice cycle diagnostics"
+                },
+            )
             clipData = ClipData.newUri(
                 appContext.contentResolver,
                 "Say it diagnostics",
@@ -110,11 +158,74 @@ internal class TurnDiagnosticsRecorder(context: Context) {
 
     private fun eventLine(name: String, fields: Map<String, String>): String {
         val elapsedMs = (SystemClock.elapsedRealtime() - startedAtElapsedMs).coerceAtLeast(0L)
+        val cycleFields = if (
+            traceMode == DiagnosticTraceMode.LIVE_SESSION && liveCycleActive
+        ) {
+            " cycle=$liveCycleIndex cycle_elapsed_ms=" +
+                (SystemClock.elapsedRealtime() - cycleStartedAtElapsedMs).coerceAtLeast(0L)
+        } else {
+            ""
+        }
         val suffix = fields.toSortedMap().entries.joinToString(separator = "") { (key, value) ->
             " ${sanitizeKey(key)}=${sanitize(value)}"
         }
-        return "elapsed_ms=$elapsedMs event=${sanitizeKey(name)}$suffix"
+        return "elapsed_ms=$elapsedMs$cycleFields event=${sanitizeKey(name)}$suffix"
     }
+
+    private fun writeHeader(
+        title: String,
+        fields: Map<String, String>,
+        includesText: Boolean,
+    ) {
+        diagnosticsDirectory.mkdirs()
+        startedAtElapsedMs = SystemClock.elapsedRealtime()
+        cycleStartedAtElapsedMs = startedAtElapsedMs
+        lastCycleFile.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.appendLine(title)
+            writer.appendLine(
+                if (includesText) {
+                    "privacy=Recognized and translated text are included for Live diagnostics; " +
+                        "audio and API keys are not included."
+                } else {
+                    "privacy=No audio, recognized text, translation text, or API keys are included."
+                },
+            )
+            writer.appendLine(
+                if (includesText) {
+                    "retention=Only the latest Live session is kept; the next Live start overwrites it."
+                } else {
+                    "retention=Only the latest normal voice cycle is kept."
+                },
+            )
+            writer.appendLine("session_started_utc=${Instant.now()}")
+            writer.appendLine("app_version=${BuildConfig.VERSION_NAME}")
+            writer.appendLine("app_version_code=${BuildConfig.VERSION_CODE}")
+            writer.appendLine("package=${BuildConfig.APPLICATION_ID}")
+            writer.appendLine("device=${sanitize(Build.MANUFACTURER)} ${sanitize(Build.MODEL)}")
+            writer.appendLine("android=${sanitize(Build.VERSION.RELEASE)} api=${Build.VERSION.SDK_INT}")
+            writer.appendLine("abis=${Build.SUPPORTED_ABIS.joinToString(",") { sanitize(it) }}")
+            fields.toSortedMap().forEach { (key, value) ->
+                writer.appendLine("${sanitizeKey(key)}=${sanitize(value)}")
+            }
+            writer.appendLine()
+            writer.appendLine("events:")
+        }
+    }
+
+    private fun finishLiveSessionLocked(outcome: String) {
+        if (liveCycleActive) {
+            appendLine(eventLine("cycle_finished", mapOf("outcome" to "interrupted_by_user")))
+            liveCycleActive = false
+        }
+        appendLine(eventLine("live_session_finished", mapOf("outcome" to outcome)))
+        active = false
+    }
+
+    private fun lastFileIsLiveSession(): Boolean = runCatching {
+        lastCycleFile.useLines { lines ->
+            lines.firstOrNull()?.contains("Conversation Live session") == true
+        }
+    }.getOrDefault(false)
 
     private fun appendLine(line: String) {
         lastCycleFile.appendText("$line\n", Charsets.UTF_8)
@@ -136,8 +247,13 @@ internal class TurnDiagnosticsRecorder(context: Context) {
 
     private companion object {
         const val MAX_KEY_LENGTH = 80
-        const val MAX_VALUE_LENGTH = 300
+        const val MAX_VALUE_LENGTH = 4_000
         val SHARE_FILE_TIME_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC)
     }
+}
+
+private enum class DiagnosticTraceMode {
+    SINGLE_CYCLE,
+    LIVE_SESSION,
 }
