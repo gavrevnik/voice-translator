@@ -33,6 +33,7 @@ This file applies to the entire repository. Start with the root [README](README.
 
 ## Testing and APK handoff
 
+- The current Codex host does not have a Java runtime installed, so local Gradle tasks cannot be run here. Do not repeatedly retry Gradle or assume that JDK 17 is available. Choose an alternative validation plan: run source-level/static checks, inspect existing reports and APK metadata only when they can be tied to the exact source revision, and exercise an already matching APK on a connected Android device when available. Clearly report that this fallback is not equivalent to a fresh build. For release validation, use another environment with JDK 17 (for example Android Studio or configured CI), or ask the user before installing a runtime.
 - Use JDK 17. From `android/`, run at minimum:
 
   ```bash
