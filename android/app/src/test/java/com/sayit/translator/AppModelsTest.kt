@@ -64,8 +64,8 @@ class AppModelsTest {
             listOf(LayoutMode.SINGLE, LayoutMode.CONVERSATION),
             LayoutMode.entries,
         )
-        assertEquals(2, TranslatorUiState().silenceAutoStopSeconds)
-        assertEquals(2, DEFAULT_SILENCE_AUTO_STOP_SECONDS)
+        assertEquals(2f, TranslatorUiState().silenceAutoStopSeconds)
+        assertEquals(2f, DEFAULT_SILENCE_AUTO_STOP_SECONDS)
         assertEquals("whisper-large-v3", GROQ_STT_MODEL)
         assertEquals("large-v3-turbo-q4_0", WHISPER_OFFLINE_MODEL)
         assertEquals(
@@ -76,6 +76,22 @@ class AppModelsTest {
             ),
             SttEngine.entries.toSet(),
         )
+    }
+
+    @Test
+    fun `automatic stop accepts one decimal from 0_1 through 5 seconds`() {
+        assertEquals(0.6f, parseSilenceAutoStopSeconds("0.6"))
+        assertEquals(0.6f, parseSilenceAutoStopSeconds("0,6"))
+        assertEquals(5f, parseSilenceAutoStopSeconds("5"))
+        assertEquals(null, parseSilenceAutoStopSeconds("0"))
+        assertEquals(null, parseSilenceAutoStopSeconds("5.1"))
+        assertEquals(null, parseSilenceAutoStopSeconds("0.65"))
+        assertEquals(0.1f, normalizeSilenceAutoStopSeconds(0f))
+        assertEquals(5f, normalizeSilenceAutoStopSeconds(6f))
+        assertEquals("0.6", formatSilenceAutoStopSeconds(0.6f))
+        assertEquals("2", formatSilenceAutoStopSeconds(2f))
+        assertEquals(600L, silenceAutoStopDurationMs(0.6f))
+        assertEquals(5_000L, silenceAutoStopDurationMs(6f))
     }
 
     @Test

@@ -1,5 +1,8 @@
 package com.sayit.translator
 
+import kotlin.math.roundToInt
+import kotlin.math.roundToLong
+
 enum class AppLanguage(
     val code: String,
     val canonicalName: String,
@@ -120,7 +123,7 @@ data class TranslatorUiState(
     val textB: String = "",
     val resultSide: LanguageSide? = null,
     val elapsedSeconds: Int = 0,
-    val silenceAutoStopSeconds: Int = DEFAULT_SILENCE_AUTO_STOP_SECONDS,
+    val silenceAutoStopSeconds: Float = DEFAULT_SILENCE_AUTO_STOP_SECONDS,
     val error: String? = null,
     val hasLastDiagnostics: Boolean = false,
 )
@@ -128,9 +131,38 @@ data class TranslatorUiState(
 const val GROQ_STT_MODEL = "whisper-large-v3"
 const val WHISPER_OFFLINE_MODEL = "large-v3-turbo-q4_0"
 const val PLAYBACK_PROGRESS_LABEL = "Android"
-const val DEFAULT_SILENCE_AUTO_STOP_SECONDS = 2
-const val MIN_SILENCE_AUTO_STOP_SECONDS = 1
-const val MAX_SILENCE_AUTO_STOP_SECONDS = 30
+const val DEFAULT_SILENCE_AUTO_STOP_SECONDS = 2f
+const val MIN_SILENCE_AUTO_STOP_SECONDS = 0.1f
+const val MAX_SILENCE_AUTO_STOP_SECONDS = 5f
+
+internal fun normalizeSilenceAutoStopSeconds(seconds: Float): Float {
+    if (!seconds.isFinite()) return DEFAULT_SILENCE_AUTO_STOP_SECONDS
+    val clamped = seconds.coerceIn(
+        MIN_SILENCE_AUTO_STOP_SECONDS,
+        MAX_SILENCE_AUTO_STOP_SECONDS,
+    )
+    return (clamped * 10f).roundToInt() / 10f
+}
+
+internal fun parseSilenceAutoStopSeconds(raw: String): Float? {
+    val normalized = raw.trim().replace(',', '.')
+    if (!normalized.matches(Regex("""\d(?:\.\d)?"""))) return null
+    return normalized.toFloatOrNull()?.takeIf {
+        it in MIN_SILENCE_AUTO_STOP_SECONDS..MAX_SILENCE_AUTO_STOP_SECONDS
+    }
+}
+
+internal fun formatSilenceAutoStopSeconds(seconds: Float): String {
+    val tenths = (normalizeSilenceAutoStopSeconds(seconds) * 10f).roundToInt()
+    return if (tenths % 10 == 0) {
+        (tenths / 10).toString()
+    } else {
+        "${tenths / 10}.${tenths % 10}"
+    }
+}
+
+internal fun silenceAutoStopDurationMs(seconds: Float): Long =
+    (normalizeSilenceAutoStopSeconds(seconds) * 1_000f).roundToLong()
 
 fun SttEngine.isWhisperOffline(): Boolean =
     this == SttEngine.WHISPER_OFFLINE

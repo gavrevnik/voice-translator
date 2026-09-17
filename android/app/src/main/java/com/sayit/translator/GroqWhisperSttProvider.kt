@@ -43,7 +43,7 @@ class GroqWhisperSttProvider(
 
     suspend fun start(
         language: AppLanguage,
-        silenceAutoStopSeconds: Int,
+        silenceAutoStopSeconds: Float,
         onSilenceAutoStop: () -> Unit,
     ) {
         if (BuildConfig.GROQ_API_KEY.isBlank()) {
@@ -51,8 +51,7 @@ class GroqWhisperSttProvider(
         }
         this.language = language
         recorder.start(
-            silenceDurationMs = silenceAutoStopSeconds
-                .coerceIn(MIN_SILENCE_AUTO_STOP_SECONDS, MAX_SILENCE_AUTO_STOP_SECONDS) * 1_000L,
+            silenceDurationMs = silenceAutoStopDurationMs(silenceAutoStopSeconds),
             onSilenceDetected = onSilenceAutoStop,
         )
     }

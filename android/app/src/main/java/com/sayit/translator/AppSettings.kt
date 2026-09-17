@@ -33,14 +33,15 @@ class AppSettings(context: Context) {
         get() = enumValue(preferences.getString(KEY_LANGUAGE_B, null), AppLanguage.ENGLISH)
         set(value) = preferences.edit().putString(KEY_LANGUAGE_B, value.name).apply()
 
-    var silenceAutoStopSeconds: Int
-        get() = preferences
-            .getInt(KEY_SILENCE_AUTO_STOP_SECONDS, DEFAULT_SILENCE_AUTO_STOP_SECONDS)
-            .coerceIn(MIN_SILENCE_AUTO_STOP_SECONDS, MAX_SILENCE_AUTO_STOP_SECONDS)
+    var silenceAutoStopSeconds: Float
+        get() = normalizeSilenceAutoStopSeconds(
+            (preferences.all[KEY_SILENCE_AUTO_STOP_SECONDS] as? Number)?.toFloat()
+                ?: DEFAULT_SILENCE_AUTO_STOP_SECONDS,
+        )
         set(value) = preferences.edit()
-            .putInt(
+            .putFloat(
                 KEY_SILENCE_AUTO_STOP_SECONDS,
-                value.coerceIn(MIN_SILENCE_AUTO_STOP_SECONDS, MAX_SILENCE_AUTO_STOP_SECONDS),
+                normalizeSilenceAutoStopSeconds(value),
             )
             .apply()
 

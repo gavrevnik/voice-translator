@@ -1578,7 +1578,7 @@ private fun SettingsScreen(
     onDeleteWhisperModel: () -> Unit,
     onSttEngine: (SttEngine) -> Unit,
     onLayoutMode: (LayoutMode) -> Unit,
-    onSilenceAutoStopSeconds: (Int) -> Unit,
+    onSilenceAutoStopSeconds: (Float) -> Unit,
     onDownloadSttPack: (AppLanguage) -> Unit,
     onRefreshSpeechPacks: () -> Unit,
     onOpenSttSettings: () -> Unit,
@@ -1751,21 +1751,16 @@ private fun SettingsScreen(
                     fontSize = 13.sp,
                 )
                 var secondsText by remember(state.silenceAutoStopSeconds) {
-                    mutableStateOf(state.silenceAutoStopSeconds.toString())
+                    mutableStateOf(formatSilenceAutoStopSeconds(state.silenceAutoStopSeconds))
                 }
-                val seconds = secondsText.toIntOrNull()
-                val valid = seconds != null &&
-                    seconds in MIN_SILENCE_AUTO_STOP_SECONDS..MAX_SILENCE_AUTO_STOP_SECONDS
+                val seconds = parseSilenceAutoStopSeconds(secondsText)
+                val valid = seconds != null
                 OutlinedTextField(
                     value = secondsText,
                     onValueChange = { updated ->
-                        if (updated.length <= 2 && updated.all { it.isDigit() }) {
+                        if (updated.matches(Regex("""^$|^\d(?:[.,]\d?)?$"""))) {
                             secondsText = updated
-                            updated.toIntOrNull()
-                                ?.takeIf {
-                                    it in MIN_SILENCE_AUTO_STOP_SECONDS..
-                                        MAX_SILENCE_AUTO_STOP_SECONDS
-                                }
+                            parseSilenceAutoStopSeconds(updated)
                                 ?.let(onSilenceAutoStopSeconds)
                         }
                     },
@@ -1774,13 +1769,12 @@ private fun SettingsScreen(
                     suffix = { Text("seconds") },
                     supportingText = {
                         Text(
-                            "Allowed range: $MIN_SILENCE_AUTO_STOP_SECONDS–" +
-                                "$MAX_SILENCE_AUTO_STOP_SECONDS seconds",
+                            "Allowed range: 0.1–5.0 seconds; one decimal place maximum",
                         )
                     },
                     isError = !valid,
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 )
             }
 

@@ -223,11 +223,8 @@ class TranslatorViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun setSilenceAutoStopSeconds(seconds: Int) {
-        val validated = seconds.coerceIn(
-            MIN_SILENCE_AUTO_STOP_SECONDS,
-            MAX_SILENCE_AUTO_STOP_SECONDS,
-        )
+    fun setSilenceAutoStopSeconds(seconds: Float) {
+        val validated = normalizeSilenceAutoStopSeconds(seconds)
         settings.silenceAutoStopSeconds = validated
         _uiState.update { it.copy(silenceAutoStopSeconds = validated) }
     }
