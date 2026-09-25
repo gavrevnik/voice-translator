@@ -5,7 +5,8 @@ setopt NO_BG_NICE
 SCRIPT_DIR="${0:A:h}"
 REPO_DIR="${SCRIPT_DIR}/../../.."
 REPO_DIR="${REPO_DIR:A}"
-URL="http://127.0.0.1:5173/"
+PUBLIC_URL="http://voice-translator.localhost/"
+INTERNAL_URL="http://127.0.0.1:5173/"
 API_URL="http://127.0.0.1:8787/api/status"
 RUNTIME_DIR="${REPO_DIR}/.runtime"
 LOG_FILE="${RUNTIME_DIR}/web.log"
@@ -15,7 +16,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 NPM_BIN="$(command -v npm || true)"
 
 frontend_ready() {
-  /usr/bin/curl -fsS --max-time 1 "${URL}" >/dev/null 2>&1
+  /usr/bin/curl -fsS --max-time 1 "${INTERNAL_URL}" >/dev/null 2>&1
 }
 
 api_ready() {
@@ -24,7 +25,7 @@ api_ready() {
 }
 
 if frontend_ready && api_ready; then
-  /usr/bin/open "${URL}"
+  /usr/bin/open "${PUBLIC_URL}"
   exit 0
 fi
 
@@ -53,7 +54,7 @@ print -r -- "$!" >"${PID_FILE}"
 
 for _ in {1..300}; do
   if frontend_ready && api_ready; then
-    /usr/bin/open "${URL}"
+    /usr/bin/open "${PUBLIC_URL}"
     exit 0
   fi
   /bin/sleep 0.1
