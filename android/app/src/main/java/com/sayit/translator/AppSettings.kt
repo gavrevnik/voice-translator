@@ -10,23 +10,12 @@ class AppSettings(context: Context) {
             .remove(KEY_GEMINI_MODEL)
             .remove(KEY_TRANSLATION_ENGINE)
             .remove(KEY_TTS_ENGINE)
+            .remove(KEY_LAYOUT_MODE)
+            .remove(KEY_STT)
+            .remove(KEY_SILENCE_AUTO_STOP_SECONDS)
+            .remove(KEY_SERBIAN_SCRIPT)
             .apply()
     }
-
-    var sttEngine: SttEngine
-        get() = enumValue(
-            preferences.getString(KEY_STT, null),
-            SttEngine.GEMINI_TRANSCRIBE_LIVE,
-        )
-        set(value) = preferences.edit().putString(KEY_STT, value.name).apply()
-
-    var layoutMode: LayoutMode
-        get() = enumValue(preferences.getString(KEY_LAYOUT_MODE, null), LayoutMode.SINGLE)
-        set(value) = preferences.edit().putString(KEY_LAYOUT_MODE, value.name).apply()
-
-    var serbianScript: SerbianScript
-        get() = enumValue(preferences.getString(KEY_SERBIAN_SCRIPT, null), SerbianScript.LATIN)
-        set(value) = preferences.edit().putString(KEY_SERBIAN_SCRIPT, value.name).apply()
 
     var languageA: AppLanguage
         get() = enumValue(preferences.getString(KEY_LANGUAGE_A, null), AppLanguage.RUSSIAN)
@@ -35,18 +24,6 @@ class AppSettings(context: Context) {
     var languageB: AppLanguage
         get() = enumValue(preferences.getString(KEY_LANGUAGE_B, null), AppLanguage.ENGLISH)
         set(value) = preferences.edit().putString(KEY_LANGUAGE_B, value.name).apply()
-
-    var silenceAutoStopSeconds: Float
-        get() = normalizeSilenceAutoStopSeconds(
-            (preferences.all[KEY_SILENCE_AUTO_STOP_SECONDS] as? Number)?.toFloat()
-                ?: DEFAULT_SILENCE_AUTO_STOP_SECONDS,
-        )
-        set(value) = preferences.edit()
-            .putFloat(
-                KEY_SILENCE_AUTO_STOP_SECONDS,
-                normalizeSilenceAutoStopSeconds(value),
-            )
-            .apply()
 
     private inline fun <reified T : Enum<T>> enumValue(raw: String?, fallback: T): T =
         enumValues<T>().firstOrNull { it.name == raw } ?: fallback

@@ -5,7 +5,6 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import okio.ByteString.Companion.encodeUtf8
-import java.nio.file.Files
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -17,11 +16,10 @@ class AppModelsTest {
             AppLanguage.entries.map { it.code }.toSet(),
         )
         assertEquals("hr-HR", AppLanguage.CROATIAN.bcp47)
-        assertEquals("hr", AppLanguage.CROATIAN.whisperCode)
     }
 
     @Test
-    fun `mobile translation exposes Gemini and offline models only`() {
+    fun `mobile translation exposes only Gemini models`() {
         val state = TranslatorUiState()
         assertEquals(TranslationEngine.GEMINI, state.translationEngine)
         assertEquals("gemini-3.5-flash-lite", state.geminiModel.id)
@@ -34,73 +32,21 @@ class AppModelsTest {
             setOf(
                 TranslationOption.GEMINI_3_1,
                 TranslationOption.GEMINI_3_5,
-                TranslationOption.OFFLINE_OPUS_SLAVIC,
             ),
             TranslationOption.entries.toSet(),
         )
-        assertEquals(
-            setOf(
-                TranslationEngine.GEMINI,
-                TranslationEngine.OFFLINE_OPUS_SLAVIC,
-            ),
-            TranslationEngine.entries.toSet(),
-        )
-    }
-
-    @Test
-    fun `progress labels use compact engine names`() {
-        assertEquals("Android", SttEngine.SYSTEM.progressLabel)
-        assertEquals("Groq Whisper", SttEngine.GROQ.progressLabel)
-        assertEquals("Gemini Live STT", SttEngine.GEMINI_TRANSCRIBE_LIVE.progressLabel)
-        assertEquals("Whisper Offline", SttEngine.WHISPER_OFFLINE.progressLabel)
-        assertEquals("Slavic FP32", TranslationOption.OFFLINE_OPUS_SLAVIC.progressLabel)
-        assertEquals("Android", PLAYBACK_PROGRESS_LABEL)
+        assertEquals(setOf(TranslationEngine.GEMINI), TranslationEngine.entries.toSet())
     }
 
     @Test
     fun `Gemini Live recognition and Gemini 3_5 translation are the defaults`() {
         assertEquals(SttEngine.GEMINI_TRANSCRIBE_LIVE, TranslatorUiState().sttEngine)
         assertEquals(GeminiTranslationModel.FLASH_3_5_LITE, TranslatorUiState().geminiModel)
-        assertEquals(LayoutMode.SINGLE, TranslatorUiState().layoutMode)
-        assertEquals(
-            listOf(LayoutMode.SINGLE, LayoutMode.CONVERSATION),
-            LayoutMode.entries,
-        )
-        assertEquals(2f, TranslatorUiState().silenceAutoStopSeconds)
-        assertEquals(2f, DEFAULT_SILENCE_AUTO_STOP_SECONDS)
-        assertEquals("whisper-large-v3", GROQ_STT_MODEL)
+        assertEquals(700, GEMINI_SERVER_VAD_SILENCE_MS)
+        assertEquals(250, GEMINI_SERVER_VAD_PREFIX_PADDING_MS)
+        assertEquals(1_000L, GEMINI_LOCAL_RMS_FALLBACK_MS)
         assertEquals("gemini-3.5-transcribe-live", GEMINI_TRANSCRIBE_LIVE_MODEL)
-        assertEquals("large-v3-turbo-q4_0", WHISPER_OFFLINE_MODEL)
-        assertEquals(
-            setOf(
-                SttEngine.SYSTEM,
-                SttEngine.GROQ,
-                SttEngine.GEMINI_TRANSCRIBE_LIVE,
-                SttEngine.WHISPER_OFFLINE,
-            ),
-            SttEngine.entries.toSet(),
-        )
-    }
-
-    @Test
-    fun `automatic stop accepts one decimal from 0_1 through 5 seconds`() {
-        assertEquals(0.6f, parseSilenceAutoStopSeconds("0.6"))
-        assertEquals(0.6f, parseSilenceAutoStopSeconds("0,6"))
-        assertEquals(5f, parseSilenceAutoStopSeconds("5"))
-        assertEquals(null, parseSilenceAutoStopSeconds("0"))
-        assertEquals(null, parseSilenceAutoStopSeconds("5.1"))
-        assertEquals(null, parseSilenceAutoStopSeconds("0.65"))
-        assertEquals(0.1f, normalizeSilenceAutoStopSeconds(0f))
-        assertEquals(5f, normalizeSilenceAutoStopSeconds(6f))
-        assertEquals("0.6", formatSilenceAutoStopSeconds(0.6f))
-        assertEquals("2", formatSilenceAutoStopSeconds(2f))
-        assertEquals(600L, silenceAutoStopDurationMs(0.6f))
-        assertEquals(5_000L, silenceAutoStopDurationMs(6f))
-    }
-
-    @Test
-    fun `offline Whisper uses only Large V3 Turbo`() {
-        assertEquals("large-v3-turbo-q4_0", WHISPER_OFFLINE_MODEL)
+        assertEquals(listOf(SttEngine.GEMINI_TRANSCRIBE_LIVE), SttEngine.entries)
     }
 
     @Test
@@ -110,13 +56,6 @@ class AppModelsTest {
             PlaybackEngine.entries,
         )
         assertEquals("Android Speech", PlaybackEngine.ANDROID_SPEECH.label)
-    }
-
-    @Test
-    fun `Android STT package matching accepts regional language tags`() {
-        assertTrue(languageTagMatches("hr", "hr-HR"))
-        assertTrue(languageTagMatches("sr-Latn-RS", "sr-RS"))
-        assertTrue(!languageTagMatches("ru-RU", "hr-HR"))
     }
 
     @Test
@@ -170,94 +109,6 @@ class AppModelsTest {
     }
 
     @Test
-    fun `system speech errors explain unsupported and missing offline languages`() {
-        val unsupported = systemSpeechRecognizerErrorMessage(12, AppLanguage.SERBIAN)
-        val unavailable = systemSpeechRecognizerErrorMessage(13, AppLanguage.SERBIAN)
-        val disconnected = systemSpeechRecognizerErrorMessage(11, AppLanguage.RUSSIAN)
-
-        assertTrue(unsupported.contains("does not support Serbian"))
-        assertTrue(unsupported.contains("error 12"))
-        assertTrue(unsupported.contains("offline Serbian speech pack"))
-        assertTrue(unavailable.contains("not downloaded"))
-        assertTrue(unavailable.contains("error 13"))
-        assertTrue(disconnected.contains("disconnected"))
-        assertTrue(disconnected.contains("error 11"))
-        assertTrue(disconnected.contains("reconnect"))
-    }
-
-    @Test
-    fun `Whisper removes an exact duplicated phrase without changing normal repetition`() {
-        assertEquals(
-            "Где находится вокзал?",
-            deduplicateWhisperTranscript("Где находится вокзал? Где находится вокзал?"),
-        )
-        assertEquals("да да", deduplicateWhisperTranscript("да да"))
-        assertEquals(
-            "Мне нужен билет на завтра",
-            deduplicateWhisperTranscript("Мне нужен билет на завтра"),
-        )
-    }
-
-    @Test
-    fun `Whisper batch config fixes model language and threads`() {
-        val config = WhisperTranscriptionConfig(
-            model = WHISPER_OFFLINE_MODEL,
-            threads = WHISPER_INFERENCE_THREADS,
-            language = AppLanguage.RUSSIAN.whisperCode,
-        )
-
-        assertEquals("large-v3-turbo-q4_0", config.model)
-        assertEquals("ru", config.language)
-        assertEquals(6, config.threads)
-        assertEquals(6, WHISPER_INFERENCE_THREADS)
-        assertEquals(200L, WHISPER_FINAL_CAPTURE_GRACE_MS)
-    }
-
-    @Test
-    fun `Whisper VAD trims only outer silence and keeps safety padding`() {
-        val samples = FloatArray(64_000) { it.toFloat() }
-
-        val trimmed = trimToOuterSpeech(
-            samples = samples,
-            speechBounds = longArrayOf(16_000, 32_000),
-        )
-
-        assertEquals(25_600, trimmed.size)
-        assertEquals(12_000f, trimmed.first())
-        assertEquals(37_599f, trimmed.last())
-    }
-
-    @Test
-    fun `Whisper VAD keeps original audio when detection is absent or saves too little`() {
-        val samples = FloatArray(32_000)
-
-        assertSame(samples, trimToOuterSpeech(samples, null))
-        assertSame(
-            samples,
-            trimToOuterSpeech(samples, longArrayOf(1_000, 31_000)),
-        )
-    }
-
-    @Test
-    fun `Android speech sessions merge overlapping text without duplicating phrases`() {
-        assertEquals(
-            "Мне нужен билет на завтра утром",
-            mergeRecognitionTranscripts(
-                "Мне нужен билет на завтра",
-                "на завтра утром",
-            ),
-        )
-        assertEquals(
-            "Где находится вокзал?",
-            mergeRecognitionTranscripts(
-                "Где находится вокзал?",
-                "где находится вокзал",
-            ),
-        )
-        assertEquals("да да", mergeRecognitionTranscripts("да", "да"))
-    }
-
-    @Test
     fun `system TTS errors explain offline voice setup`() {
         val missing = offlineVoiceMissingMessage(AppLanguage.SERBIAN)
         val serviceFailure = systemTtsErrorMessage(-4, AppLanguage.SERBIAN)
@@ -266,11 +117,6 @@ class AppModelsTest {
         assertTrue(missing.contains("Android speech packages in Settings"))
         assertTrue(serviceFailure.contains("text-to-speech service failed"))
         assertTrue(serviceFailure.contains("offline voice is installed"))
-    }
-
-    @Test
-    fun `Groq build key is configured without exposing it`() {
-        assertTrue(BuildConfig.GROQ_API_KEY.startsWith("gsk_"))
     }
 
     @Test
@@ -339,11 +185,8 @@ class AppModelsTest {
     }
 
     @Test
-    fun `only Groq and Gemini Live support Conversation Live`() {
-        assertTrue(SttEngine.GROQ.supportsConversationLive())
+    fun `Gemini Live supports Conversation Live`() {
         assertTrue(SttEngine.GEMINI_TRANSCRIBE_LIVE.supportsConversationLive())
-        assertTrue(!SttEngine.SYSTEM.supportsConversationLive())
-        assertTrue(!SttEngine.WHISPER_OFFLINE.supportsConversationLive())
     }
 
     @Test
@@ -426,159 +269,6 @@ class AppModelsTest {
     }
 
     @Test
-    fun `live language aliases map south Slavic and Moldavian variants`() {
-        listOf("Serbian", "hr", "Bosnian").forEach { detected ->
-            val mapped = mapLiveDetectedLanguage(detected)
-            assertEquals("Serbian", mapped.canonicalName)
-            assertEquals(AppLanguage.SERBIAN, mapped.appLanguage)
-        }
-        listOf("Romanian", "mo", "Moldovan").forEach { detected ->
-            val mapped = mapLiveDetectedLanguage(detected)
-            assertEquals("Romanian", mapped.canonicalName)
-            assertEquals(AppLanguage.ROMANIAN, mapped.appLanguage)
-        }
-    }
-
-    @Test
-    fun `live language selects a matching side and falls back for unknown language`() {
-        assertEquals(
-            LanguageSide.A,
-            resolveLiveSpeakerSide(
-                detectedLanguage = mapLiveDetectedLanguage("Croatian"),
-                languageA = AppLanguage.SERBIAN,
-                languageB = AppLanguage.ENGLISH,
-                fallbackSide = LanguageSide.B,
-            ),
-        )
-        assertEquals(
-            LanguageSide.B,
-            resolveLiveSpeakerSide(
-                detectedLanguage = mapLiveDetectedLanguage("German"),
-                languageA = AppLanguage.RUSSIAN,
-                languageB = AppLanguage.ENGLISH,
-                fallbackSide = LanguageSide.B,
-            ),
-        )
-    }
-
-    @Test
-    fun `live transcript annotation is display-only for a third language`() {
-        val detected = mapLiveDetectedLanguage("German")
-
-        assertEquals(
-            "Recognized language — German\n\nGuten Tag",
-            liveTranscriptForDisplay("Guten Tag", detected, AppLanguage.RUSSIAN),
-        )
-        assertEquals(
-            "Dobar dan",
-            liveTranscriptForDisplay(
-                "Dobar dan",
-                mapLiveDetectedLanguage("Bosnian"),
-                AppLanguage.CROATIAN,
-            ),
-        )
-    }
-
-    @Test
-    fun `offline OPUS models expose only compatible app language pairs`() {
-        assertTrue(isOfflineSlavicDirection(AppLanguage.RUSSIAN, AppLanguage.SERBIAN))
-        assertTrue(isOfflineSlavicDirection(AppLanguage.SERBIAN, AppLanguage.RUSSIAN))
-        assertTrue(isOfflineSlavicDirection(AppLanguage.RUSSIAN, AppLanguage.CROATIAN))
-        assertTrue(isOfflineSlavicDirection(AppLanguage.CROATIAN, AppLanguage.RUSSIAN))
-        assertTrue(!isOfflineSlavicDirection(AppLanguage.SERBIAN, AppLanguage.CROATIAN))
-    }
-
-    @Test
-    fun `offline prompts use the correct target script token and preserve the phrase`() {
-        assertEquals(
-            ">>srp_Latn<< Где находится вокзал?",
-            offlineOpusInput(
-                OfflineOpusFamily.SLAVIC,
-                AppLanguage.SERBIAN,
-                SerbianScript.LATIN,
-                "Где находится вокзал?",
-            ),
-        )
-        assertEquals(
-            ">>srp_Cyrl<< Анна купила 2 билета.",
-            offlineOpusInput(
-                OfflineOpusFamily.SLAVIC,
-                AppLanguage.SERBIAN,
-                SerbianScript.CYRILLIC,
-                "Анна купила 2 билета.",
-            ),
-        )
-        assertEquals(
-            ">>rus<< Treba mi kafa.",
-            offlineOpusInput(
-                OfflineOpusFamily.SLAVIC,
-                AppLanguage.RUSSIAN,
-                SerbianScript.LATIN,
-                "Treba mi kafa.",
-            ),
-        )
-        assertEquals(
-            ">>rus<< Zdravo, kako si?",
-            offlineOpusInput(
-                OfflineOpusFamily.SLAVIC,
-                AppLanguage.RUSSIAN,
-                SerbianScript.LATIN,
-                "Zdravo, kako si?",
-            ),
-        )
-        assertEquals(
-            ">>hrv<< Где находится вокзал?",
-            offlineOpusInput(
-                OfflineOpusFamily.SLAVIC,
-                AppLanguage.CROATIAN,
-                SerbianScript.LATIN,
-                "Где находится вокзал?",
-            ),
-        )
-    }
-
-    @Test
-    fun `offline OPUS reapplies the target token to every sentence`() {
-        val transcript =
-            "Сегодня я немного устал. Если погода будет хорошая, ещё немного прогуляюсь."
-
-        assertEquals(
-            listOf(
-                ">>hrv<< Сегодня я немного устал.",
-                ">>hrv<< Если погода будет хорошая, ещё немного прогуляюсь.",
-            ),
-            offlineOpusInputs(
-                family = OfflineOpusFamily.SLAVIC,
-                sourceLanguage = AppLanguage.RUSSIAN,
-                targetLanguage = AppLanguage.CROATIAN,
-                serbianScript = SerbianScript.LATIN,
-                transcript = transcript,
-            ),
-        )
-    }
-
-    @Test
-    fun `offline model validation reports missing and corrupted files`() {
-        val directory = Files.createTempDirectory("sayit-offline-test").toFile()
-        val manifest = testOfflineManifest()
-        try {
-            assertEquals(
-                "Model file is missing: model.bin",
-                OfflineModelIntegrity.validate(directory, manifest),
-            )
-            val model = directory.resolve("model.bin")
-            model.writeText("bad")
-            assertEquals(
-                "Model file checksum mismatch: model.bin",
-                OfflineModelIntegrity.validate(directory, manifest),
-            )
-            assertTrue(!OfflineModelIntegrity.matchesChecksum(model, TEST_SHA256))
-        } finally {
-            directory.deleteRecursively()
-        }
-    }
-
-    @Test
     fun `PCM encoder produces a valid mono 16 kHz WAV`() {
         val pcm = byteArrayOf(1, 2, 3, 4)
         val wav = encodePcm16Wav(pcm, 16_000)
@@ -593,25 +283,4 @@ class AppModelsTest {
         assertEquals(48, wav.size)
     }
 
-    private fun testOfflineManifest() = OfflineModelManifest(
-        id = "test",
-        version = "1",
-        displayName = "Test",
-        downloadUrl = "https://example.test/model.zip",
-        sha256 = TEST_SHA256,
-        downloadSize = 4,
-        installedSize = 4,
-        supportedDirections = setOf("ru-sr", "sr-ru", "ru-hr", "hr-ru"),
-        supportedScripts = setOf("srp_Latn", "srp_Cyrl", "hrv"),
-        runtimeType = "test",
-        runtimeVersion = "1",
-        modelFile = "model.bin",
-        requiredFiles = setOf("model.bin"),
-        files = listOf(OfflineModelFileSpec("model.bin", 3, TEST_SHA256)),
-    )
-
-    private companion object {
-        const val TEST_SHA256 =
-            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-    }
 }

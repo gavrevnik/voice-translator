@@ -39,22 +39,22 @@ class GeminiLiveTranscribeSttProvider(
     override suspend fun start(language: AppLanguage, onPartialResult: (String) -> Unit) {
         start(
             language = language,
-            silenceAutoStopSeconds = DEFAULT_SILENCE_AUTO_STOP_SECONDS,
-            onSilenceAutoStop = {},
+            onServerVadEnd = {},
+            onLocalRmsFallback = {},
             onPartialResult = onPartialResult,
         )
     }
 
     suspend fun start(
         language: AppLanguage,
-        silenceAutoStopSeconds: Float,
-        onSilenceAutoStop: () -> Unit,
+        onServerVadEnd: () -> Unit,
+        onLocalRmsFallback: () -> Unit,
         onPartialResult: (String) -> Unit,
     ) {
         startSession(
             languages = listOf(language),
-            silenceAutoStopSeconds = silenceAutoStopSeconds,
-            onSilenceAutoStop = onSilenceAutoStop,
+            onServerVadEnd = onServerVadEnd,
+            onLocalRmsFallback = onLocalRmsFallback,
             onPartialResult = onPartialResult,
         )
     }
@@ -62,22 +62,22 @@ class GeminiLiveTranscribeSttProvider(
     suspend fun startLive(
         languageA: AppLanguage,
         languageB: AppLanguage,
-        silenceAutoStopSeconds: Float,
-        onSilenceAutoStop: () -> Unit,
+        onServerVadEnd: () -> Unit,
+        onLocalRmsFallback: () -> Unit,
         onPartialResult: (String) -> Unit,
     ) {
         startSession(
             languages = listOf(languageA, languageB).distinct(),
-            silenceAutoStopSeconds = silenceAutoStopSeconds,
-            onSilenceAutoStop = onSilenceAutoStop,
+            onServerVadEnd = onServerVadEnd,
+            onLocalRmsFallback = onLocalRmsFallback,
             onPartialResult = onPartialResult,
         )
     }
 
     private suspend fun startSession(
         languages: List<AppLanguage>,
-        silenceAutoStopSeconds: Float,
-        onSilenceAutoStop: () -> Unit,
+        onServerVadEnd: () -> Unit,
+        onLocalRmsFallback: () -> Unit,
         onPartialResult: (String) -> Unit,
     ) {
         val apiKey = BuildConfig.GEMINI_API_KEY.trim()
@@ -88,6 +88,7 @@ class GeminiLiveTranscribeSttProvider(
         val languageCodes = languages.map(AppLanguage::bcp47)
         val session = LiveSession(
             languageCodes = languageCodes,
+            onServerVadEnd = onServerVadEnd,
             onPartialResult = onPartialResult,
         )
         check(activeSession.compareAndSet(null, session)) {
@@ -103,8 +104,8 @@ class GeminiLiveTranscribeSttProvider(
             val socket = client.newWebSocket(request, listenerFor(session))
             session.attach(socket)
             recorder.start(
-                silenceDurationMs = silenceAutoStopDurationMs(silenceAutoStopSeconds),
-                onSilenceDetected = onSilenceAutoStop,
+                silenceDurationMs = GEMINI_LOCAL_RMS_FALLBACK_MS,
+                onSilenceDetected = onLocalRmsFallback,
                 onPcmChunk = session::offerAudio,
             )
             withTimeout(SETUP_TIMEOUT_MS) { session.setupComplete.await() }
@@ -114,6 +115,10 @@ class GeminiLiveTranscribeSttProvider(
                     "model" to GEMINI_TRANSCRIBE_LIVE_MODEL,
                     "candidate_languages" to languageCodes.joinToString(","),
                     "server_frame_type" to session.setupFrameType,
+                    "server_vad_silence_ms" to GEMINI_SERVER_VAD_SILENCE_MS.toString(),
+                    "server_vad_prefix_padding_ms" to
+                        GEMINI_SERVER_VAD_PREFIX_PADDING_MS.toString(),
+                    "local_rms_fallback_ms" to GEMINI_LOCAL_RMS_FALLBACK_MS.toString(),
                     "setup_duration_ms" to
                         (SystemClock.elapsedRealtime() - connectedAt).toString(),
                 ),
@@ -129,7 +134,7 @@ class GeminiLiveTranscribeSttProvider(
     override suspend fun stop(): String = withContext(Dispatchers.IO) {
         val session = activeSession.get() ?: error("No Gemini Live transcription is active.")
         try {
-            val recording = recorder.stop()
+            val recording = recorder.stop(allowNoLocalSpeech = true)
             session.endAudio()
             val transcript = withTimeout(FINAL_RESULT_TIMEOUT_MS) { session.finalResult.await() }
             if (transcript.isBlank()) error("Gemini Live Transcribe returned an empty transcript.")
@@ -205,6 +210,7 @@ class GeminiLiveTranscribeSttProvider(
 
     private class LiveSession(
         val languageCodes: List<String>,
+        private val onServerVadEnd: () -> Unit,
         private val onPartialResult: (String) -> Unit,
     ) {
         val setupComplete = CompletableDeferred<Unit>()
@@ -214,6 +220,7 @@ class GeminiLiveTranscribeSttProvider(
         private var socket: WebSocket? = null
         private var setupReady = false
         private var audioEnded = false
+        private var serverVadEndDelivered = false
         private var committedText = ""
         private var pendingAudioBytes = 0
         @Volatile var setupFrameType = "unknown"
@@ -274,6 +281,7 @@ class GeminiLiveTranscribeSttProvider(
                 ?: content.optJSONObject("input_transcription")
             val interimTranscription = content.optJSONObject("interimInputTranscription")
                 ?: content.optJSONObject("interim_input_transcription")
+            var notifyServerVadEnd = false
             synchronized(lock) {
                 finalTranscription?.let { transcription ->
                     val text = transcription.optString("text").trim()
@@ -299,7 +307,17 @@ class GeminiLiveTranscribeSttProvider(
                 ) {
                     scheduleCommittedCompletionLocked()
                 }
+                if (
+                    !audioEnded &&
+                    !serverVadEndDelivered &&
+                    committedText.isNotBlank() &&
+                    (finalTranscription != null || content.optBoolean("turnComplete"))
+                ) {
+                    serverVadEndDelivered = true
+                    notifyServerVadEnd = true
+                }
             }
+            if (notifyServerVadEnd) runCatching(onServerVadEnd)
         }
 
         fun fail(throwable: Throwable) {
@@ -387,6 +405,18 @@ internal fun geminiLiveSetupPayload(languageCodes: List<String>): JSONObject = J
                 JSONObject()
                     .put("languageCodes", JSONArray(languageCodes))
                     .put("mode", "VERBATIM"),
+            )
+            .put(
+                "realtimeInputConfig",
+                JSONObject().put(
+                    "automaticActivityDetection",
+                    JSONObject()
+                        .put("disabled", false)
+                        .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
+                        .put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH")
+                        .put("prefixPaddingMs", GEMINI_SERVER_VAD_PREFIX_PADDING_MS)
+                        .put("silenceDurationMs", GEMINI_SERVER_VAD_SILENCE_MS),
+                ),
             ),
     )
 

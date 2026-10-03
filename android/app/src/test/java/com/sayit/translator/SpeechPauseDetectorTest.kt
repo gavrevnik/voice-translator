@@ -85,7 +85,7 @@ class SpeechPauseDetectorTest {
             capturedBytesAtDetection = fiveSecondsOfPcm16,
             trailingSilenceSamples = SAMPLE_RATE * 2L,
             sampleRate = SAMPLE_RATE,
-            postRollMs = GROQ_AUTO_STOP_POST_ROLL_MS,
+            postRollMs = AUDIO_AUTO_STOP_POST_ROLL_MS,
         )
 
         assertEquals(SAMPLE_RATE * 33 / 10 * 2, cutByteCount)
@@ -101,7 +101,7 @@ class SpeechPauseDetectorTest {
                 capturedBytesAtDetection = capturedBytes,
                 trailingSilenceSamples = SAMPLE_RATE / 10L,
                 sampleRate = SAMPLE_RATE,
-                postRollMs = GROQ_AUTO_STOP_POST_ROLL_MS,
+                postRollMs = AUDIO_AUTO_STOP_POST_ROLL_MS,
             ),
         )
     }

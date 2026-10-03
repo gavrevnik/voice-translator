@@ -89,7 +89,10 @@ internal fun offlineOpusInput(
     val targetToken = when (family) {
         OfflineOpusFamily.SLAVIC -> when (targetLanguage) {
             AppLanguage.RUSSIAN -> ">>rus<<"
-            AppLanguage.SERBIAN -> serbianScript.targetToken
+            AppLanguage.SERBIAN -> when (serbianScript) {
+                SerbianScript.LATIN -> ">>srp_Latn<<"
+                SerbianScript.CYRILLIC -> ">>srp_Cyrl<<"
+            }
             AppLanguage.CROATIAN -> ">>hrv<<"
             else -> error("Unsupported Slavic target language: ${targetLanguage.canonicalName}")
         }

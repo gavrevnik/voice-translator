@@ -6,7 +6,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,7 +24,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,36 +36,27 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.People
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -81,11 +70,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -93,6 +82,15 @@ import androidx.compose.ui.unit.sp
 fun TranslatorScreen(viewModel: TranslatorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val view = LocalView.current
+
+    if (state.liveModeActive) {
+        DisposableEffect(view) {
+            view.keepScreenOn = true
+            onDispose { view.keepScreenOn = false }
+        }
+    }
+
     var settingsOpen by remember { mutableStateOf(false) }
     var expandedPhrase by remember { mutableStateOf<ExpandedPhrase?>(null) }
     var pendingSide by remember { mutableStateOf<LanguageSide?>(null) }
@@ -146,12 +144,6 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
         viewModel.refreshAndroidLanguagePacks()
         settingsOpen = true
     }
-    val openSttSettings = {
-        runCatching {
-            languagePackLauncher.launch(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-        }
-        Unit
-    }
     val installTts: (AppLanguage) -> Unit = { language ->
         viewModel.createAndroidTtsInstallIntent(language)?.let(languagePackLauncher::launch)
     }
@@ -160,21 +152,7 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
         SettingsScreen(
             state = state,
             onTranslationOption = viewModel::setTranslationOption,
-            onSerbianScript = viewModel::setSerbianScript,
-            onDownloadOfflineModel = viewModel::downloadOfflineModel,
-            onDeleteOfflineModel = viewModel::deleteOfflineModel,
-            onDownloadWhisperModel = viewModel::downloadWhisperModel,
-            onDeleteWhisperModel = viewModel::deleteWhisperModel,
-            onSttEngine = viewModel::setSttEngine,
-            onLayoutMode = viewModel::setLayoutMode,
-            onSilenceAutoStopSeconds = viewModel::setSilenceAutoStopSeconds,
-            onDownloadSttPack = viewModel::downloadAndroidSpeechPack,
             onRefreshSpeechPacks = viewModel::refreshAndroidLanguagePacks,
-            onOpenSttSettings = {
-                runCatching {
-                    languagePackLauncher.launch(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-                }
-            },
             onInstallTtsPack = { language ->
                 viewModel.createAndroidTtsInstallIntent(language)?.let(languagePackLauncher::launch)
             },
@@ -195,240 +173,31 @@ fun TranslatorScreen(viewModel: TranslatorViewModel) {
         return
     }
 
-    if (state.layoutMode == LayoutMode.CONVERSATION) {
-        ConversationModeScreen(
-            state = state,
-            onMicrophone = onMicrophone,
-            onLive = onLive,
-            onLanguage = viewModel::setLanguage,
-            onToggleMode = viewModel::toggleLayoutMode,
-            onOpenSettings = openSettings,
-            onReplay = viewModel::replay,
-            onStopPlayback = viewModel::stopPlayback,
-            onDownloadStt = viewModel::downloadAndroidSpeechPack,
-            onRefreshPacks = viewModel::refreshAndroidLanguagePacks,
-            onOpenSttSettings = openSttSettings,
-            onInstallTts = installTts,
-            onOpenText = { side, rotationDegrees ->
-                val language = if (side == LanguageSide.A) state.languageA else state.languageB
-                val text = if (side == LanguageSide.A) state.textA else state.textB
-                val color = if (side == LanguageSide.A) SayItBlue else SayItRed
-                val background = if (side == LanguageSide.A) SayItBlueSoft else SayItRedSoft
-                expandedPhrase = ExpandedPhrase(
-                    label = language.nativeName,
-                    text = text,
-                    color = color,
-                    background = background,
-                    canCopy = false,
-                    rotationDegrees = rotationDegrees,
-                )
-            },
-        )
-        return
-    }
-
-    val sourceSide = state.activeSide
-        ?: state.resultSide?.let { if (it == LanguageSide.A) LanguageSide.B else LanguageSide.A }
-        ?: LanguageSide.A
-    val targetSide = if (sourceSide == LanguageSide.A) LanguageSide.B else LanguageSide.A
-    val sourceLanguage = if (sourceSide == LanguageSide.A) state.languageA else state.languageB
-    val targetLanguage = if (targetSide == LanguageSide.A) state.languageA else state.languageB
-    val sourceText = if (sourceSide == LanguageSide.A) state.textA else state.textB
-    val targetText = if (targetSide == LanguageSide.A) state.textA else state.textB
-    val sourceColor = if (sourceSide == LanguageSide.A) SayItBlue else SayItRed
-    val targetColor = if (targetSide == LanguageSide.A) SayItBlue else SayItRed
-    val sourceBackground = if (sourceSide == LanguageSide.A) SayItBlueSoft else SayItRedSoft
-    val targetBackground = if (targetSide == LanguageSide.A) SayItBlueSoft else SayItRedSoft
-    val sourceLabel = sourceLanguage.nativeName
-    val targetLabel = targetLanguage.nativeName
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(SayItPaper)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        MainControlRow(
-            state = state,
-            onToggleMode = viewModel::toggleLayoutMode,
-            onOpenSettings = openSettings,
-            onStopPlayback = viewModel::stopPlayback,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            LanguagePicker(
-                modifier = Modifier.weight(1f),
-                selected = state.languageA,
-                excluded = state.languageB,
-                color = SayItBlue,
-                background = SayItBlueSoft,
-                enabled = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR,
-                onSelected = { viewModel.setLanguage(LanguageSide.A, it) },
+    ConversationModeScreen(
+        state = state,
+        onMicrophone = onMicrophone,
+        onLive = onLive,
+        onFinishLiveTurn = viewModel::finishCurrentLiveTurn,
+        onLanguage = viewModel::setLanguage,
+        onOpenSettings = openSettings,
+        onReplay = viewModel::replay,
+        onStopPlayback = viewModel::stopPlayback,
+        onInstallTts = installTts,
+        onOpenText = { side, rotationDegrees ->
+            val language = if (side == LanguageSide.A) state.languageA else state.languageB
+            val text = if (side == LanguageSide.A) state.textA else state.textB
+            val color = if (side == LanguageSide.A) SayItBlue else SayItRed
+            val background = if (side == LanguageSide.A) SayItBlueSoft else SayItRedSoft
+            expandedPhrase = ExpandedPhrase(
+                label = language.nativeName,
+                text = text,
+                color = color,
+                background = background,
+                canCopy = false,
+                rotationDegrees = rotationDegrees,
             )
-            LanguagePicker(
-                modifier = Modifier.weight(1f),
-                selected = state.languageB,
-                excluded = state.languageA,
-                color = SayItRed,
-                background = SayItRedSoft,
-                enabled = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR,
-                onSelected = { viewModel.setLanguage(LanguageSide.B, it) },
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            SpeechButton(
-                modifier = Modifier.weight(1f),
-                side = LanguageSide.A,
-                language = state.languageA,
-                color = SayItBlue,
-                status = state.status,
-                activeSide = state.activeSide,
-                onMicrophone = { onMicrophone(LanguageSide.A) },
-            )
-            SpeechButton(
-                modifier = Modifier.weight(1f),
-                side = LanguageSide.B,
-                language = state.languageB,
-                color = SayItRed,
-                status = state.status,
-                activeSide = state.activeSide,
-                onMicrophone = { onMicrophone(LanguageSide.B) },
-            )
-        }
-
-        AndroidLanguagePackActions(
-            state = state,
-            onDownloadStt = viewModel::downloadAndroidSpeechPack,
-            onRefresh = viewModel::refreshAndroidLanguagePacks,
-            onOpenSttSettings = openSttSettings,
-            onInstallTts = installTts,
-        )
-
-        PhraseCard(
-            label = sourceLabel,
-            text = sourceText,
-            color = sourceColor,
-            background = sourceBackground,
-            isPartial = state.partialTranscriptSide == sourceSide,
-            canReplay = false,
-            canCopy = false,
-            onReplay = viewModel::replay,
-            onCopy = {},
-            onOpen = {
-                expandedPhrase = ExpandedPhrase(
-                    label = sourceLabel,
-                    text = sourceText,
-                    color = sourceColor,
-                    background = sourceBackground,
-                    canCopy = false,
-                )
-            },
-        )
-        PhraseCard(
-            label = targetLabel,
-            text = targetText,
-            color = targetColor,
-            background = targetBackground,
-            isPartial = false,
-            canReplay = state.resultSide == targetSide && state.status == VoiceStatus.READY,
-            canCopy = true,
-            onReplay = viewModel::replay,
-            onCopy = { copyText(context, targetText) },
-            onOpen = {
-                expandedPhrase = ExpandedPhrase(
-                    label = targetLabel,
-                    text = targetText,
-                    color = targetColor,
-                    background = targetBackground,
-                    canCopy = true,
-                )
-            },
-        )
-
-        state.error?.let {
-            Text(
-                text = it,
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.error,
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp,
-            )
-        }
-    }
-
-}
-
-@Composable
-private fun MainControlRow(
-    state: TranslatorUiState,
-    onToggleMode: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onStopPlayback: () -> Unit,
-) {
-    val modeCanChange = state.status == VoiceStatus.READY || state.status == VoiceStatus.ERROR
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TurnProgress(
-            modifier = Modifier.weight(1f),
-            status = state.status,
-            hasResult = state.resultSide != null,
-            elapsedSeconds = state.elapsedSeconds,
-            recognitionLabel = state.sttEngine.progressLabel,
-            translationLabel = TranslationOption.from(state).progressLabel,
-            playbackLabel = PLAYBACK_PROGRESS_LABEL,
-            onStopPlayback = onStopPlayback,
-        )
-        IconButton(
-            onClick = onToggleMode,
-            enabled = modeCanChange,
-            modifier = Modifier
-                .size(40.dp)
-                .background(
-                    color = if (state.layoutMode == LayoutMode.CONVERSATION) {
-                        SayItInk
-                    } else {
-                        Color.White.copy(alpha = 0.55f)
-                    },
-                    shape = RoundedCornerShape(12.dp),
-                ),
-        ) {
-            Icon(
-                Icons.Filled.People,
-                contentDescription = if (state.layoutMode == LayoutMode.CONVERSATION) {
-                    "Switch to single mode"
-                } else {
-                    "Conversation mode"
-                },
-                tint = if (state.layoutMode == LayoutMode.CONVERSATION) Color.White else SayItInk,
-                modifier = Modifier.size(21.dp),
-            )
-        }
-        IconButton(
-            onClick = onOpenSettings,
-            modifier = Modifier.size(40.dp),
-        ) {
-            Icon(
-                Icons.Filled.Settings,
-                contentDescription = "Settings",
-                modifier = Modifier.size(22.dp),
-            )
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -436,14 +205,11 @@ private fun ConversationModeScreen(
     state: TranslatorUiState,
     onMicrophone: (LanguageSide) -> Unit,
     onLive: (LanguageSide) -> Unit,
+    onFinishLiveTurn: () -> Unit,
     onLanguage: (LanguageSide, AppLanguage) -> Unit,
-    onToggleMode: () -> Unit,
     onOpenSettings: () -> Unit,
     onReplay: () -> Unit,
     onStopPlayback: () -> Unit,
-    onDownloadStt: (AppLanguage) -> Unit,
-    onRefreshPacks: () -> Unit,
-    onOpenSttSettings: () -> Unit,
     onInstallTts: (AppLanguage) -> Unit,
     onOpenText: (LanguageSide, Float) -> Unit,
 ) {
@@ -497,18 +263,16 @@ private fun ConversationModeScreen(
 
         ConversationControlRow(
             onOpenSettings = onOpenSettings,
-            onExitConversation = onToggleMode,
             onToggleLive = { onLive(bottomSide) },
+            onFinishLiveTurn = onFinishLiveTurn,
             onSwapSides = { if (controlsEnabled) sidesSwapped = !sidesSwapped },
             enabled = controlsEnabled,
             liveModeActive = state.liveModeActive,
+            liveTurnCanFinish = state.status == VoiceStatus.LISTENING,
         )
 
         AndroidLanguagePackActions(
             state = state,
-            onDownloadStt = onDownloadStt,
-            onRefresh = onRefreshPacks,
-            onOpenSttSettings = onOpenSttSettings,
             onInstallTts = onInstallTts,
         )
 
@@ -545,11 +309,12 @@ private fun ConversationModeScreen(
 @Composable
 private fun ConversationControlRow(
     onOpenSettings: () -> Unit,
-    onExitConversation: () -> Unit,
     onToggleLive: () -> Unit,
+    onFinishLiveTurn: () -> Unit,
     onSwapSides: () -> Unit,
     enabled: Boolean,
     liveModeActive: Boolean,
+    liveTurnCanFinish: Boolean,
 ) {
     Row(
         modifier = Modifier
@@ -565,13 +330,6 @@ private fun ConversationControlRow(
             contentDescription = "Settings",
         )
         ConversationCentralControl(
-            onClick = onExitConversation,
-            enabled = enabled,
-            active = true,
-            imageVector = Icons.Filled.People,
-            contentDescription = "Exit conversation mode",
-        )
-        ConversationCentralControl(
             onClick = onToggleLive,
             enabled = enabled || liveModeActive,
             active = liveModeActive,
@@ -583,10 +341,15 @@ private fun ConversationControlRow(
             },
         )
         ConversationCentralControl(
-            onClick = onSwapSides,
-            enabled = enabled,
-            imageVector = Icons.Filled.SwapVert,
-            contentDescription = "Swap conversation sides",
+            onClick = if (liveModeActive) onFinishLiveTurn else onSwapSides,
+            enabled = if (liveModeActive) liveTurnCanFinish else enabled,
+            active = liveModeActive && liveTurnCanFinish,
+            imageVector = if (liveModeActive) AppIcons.Translate else AppIcons.SwapVert,
+            contentDescription = if (liveModeActive) {
+                "Finish listening and translate"
+            } else {
+                "Swap conversation sides"
+            },
         )
     }
 }
@@ -786,9 +549,9 @@ private fun ConversationTextCard(
                 ) {
                     Icon(
                         imageVector = if (isPlayingTranslation) {
-                            Icons.Filled.Stop
+                            AppIcons.Stop
                         } else {
-                            Icons.AutoMirrored.Filled.VolumeUp
+                            AppIcons.VolumeUp
                         },
                         contentDescription = if (isPlayingTranslation) {
                             "Stop translation playback"
@@ -849,7 +612,7 @@ private fun ConversationSpeechControl(
             ),
         ) {
             Icon(
-                imageVector = if (listeningHere) Icons.Filled.Stop else Icons.Filled.Mic,
+                imageVector = if (listeningHere) AppIcons.Stop else AppIcons.Mic,
                 contentDescription = null,
                 modifier = Modifier.size(23.dp),
             )
@@ -925,145 +688,15 @@ private fun ConversationSpeechControl(
 }
 
 @Composable
-private fun TurnProgress(
-    modifier: Modifier = Modifier,
-    status: VoiceStatus,
-    hasResult: Boolean,
-    elapsedSeconds: Int,
-    recognitionLabel: String,
-    translationLabel: String,
-    playbackLabel: String,
-    onStopPlayback: () -> Unit,
-) {
-    val activeIndex = when (status) {
-        VoiceStatus.LISTENING, VoiceStatus.RECOGNIZING -> 0
-        VoiceStatus.TRANSLATING -> 1
-        VoiceStatus.SPEAKING -> 2
-        VoiceStatus.READY -> if (hasResult) 3 else -1
-        VoiceStatus.ERROR -> -1
-    }
-    val labels = listOf(recognitionLabel, translationLabel, playbackLabel)
-    val labelWeights = listOf(1.45f, 1.15f, 0.9f)
-
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
-        color = Color.White.copy(alpha = 0.5f),
-        border = BorderStroke(1.dp, SayItInk.copy(alpha = 0.12f)),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(
-                modifier = Modifier
-                    .weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                labels.forEachIndexed { index, label ->
-                    Row(
-                        modifier = Modifier.weight(labelWeights[index]),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        ProgressDot(
-                            completed = activeIndex == 3 || index < activeIndex,
-                            active = index == activeIndex,
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            text = label,
-                            color = if (activeIndex == 3 || index <= activeIndex) {
-                                SayItInk
-                            } else {
-                                SayItMuted
-                            },
-                            fontSize = if (index == 0 && label.length > 14) 5.sp else 6.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (index < labels.lastIndex) {
-                        ProgressConnector(completed = index < activeIndex)
-                    }
-                }
-            }
-            if (status == VoiceStatus.LISTENING || status == VoiceStatus.SPEAKING) {
-                Box(
-                    modifier = Modifier
-                        .width(36.dp)
-                        .height(40.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (status == VoiceStatus.LISTENING) {
-                        Text(
-                            text = formatClock(elapsedSeconds),
-                            color = SayItMuted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                        )
-                    } else if (status == VoiceStatus.SPEAKING) {
-                        IconButton(
-                            onClick = onStopPlayback,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(SayItInk, RoundedCornerShape(10.dp)),
-                        ) {
-                            Icon(
-                                Icons.Filled.Stop,
-                                contentDescription = "Stop playback",
-                                tint = Color.White,
-                                modifier = Modifier.size(17.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProgressDot(completed: Boolean, active: Boolean) {
-    val color = when {
-        active -> SayItRed
-        completed -> SayItInk
-        else -> Color.Transparent
-    }
-    val borderColor = when {
-        active -> SayItRed
-        completed -> SayItInk
-        else -> SayItMuted.copy(alpha = 0.5f)
-    }
-    Box(
-        modifier = Modifier
-            .size(10.dp)
-            .background(color, CircleShape)
-            .border(2.dp, borderColor, CircleShape),
-    )
-}
-
-@Composable
 private fun AndroidLanguagePackActions(
     state: TranslatorUiState,
-    onDownloadStt: (AppLanguage) -> Unit,
-    onRefresh: () -> Unit,
-    onOpenSttSettings: () -> Unit,
     onInstallTts: (AppLanguage) -> Unit,
 ) {
     val languages = listOf(state.languageA, state.languageB)
-    val sttMissing = if (state.sttEngine == SttEngine.SYSTEM) {
-        languages.filter { language ->
-            state.androidSttLanguagePacks[language]?.isInstalled != true
-        }
-    } else {
-        emptyList()
-    }
     val ttsMissing = languages.filter { language ->
         state.androidTtsLanguagePacks[language]?.isInstalled != true
     }
-    if (sttMissing.isEmpty() && ttsMissing.isEmpty()) return
+    if (ttsMissing.isEmpty()) return
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1074,39 +707,6 @@ private fun AndroidLanguagePackActions(
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
         ) {
-            sttMissing.forEach { language ->
-                val status = state.androidSttLanguagePacks[language]
-                    ?: AndroidLanguagePackStatus.CHECKING
-                AndroidPackAction(
-                    prefix = "Speech",
-                    language = language,
-                    status = status,
-                    actionLabel = when (status.availability) {
-                        AndroidLanguagePackAvailability.DOWNLOADABLE -> "Download"
-                        AndroidLanguagePackAvailability.SETUP_REQUIRED -> "Initialize"
-                        AndroidLanguagePackAvailability.SCHEDULED -> "Check again"
-                        AndroidLanguagePackAvailability.ONLINE_ONLY,
-                        AndroidLanguagePackAvailability.UNSUPPORTED,
-                        AndroidLanguagePackAvailability.UNKNOWN,
-                        AndroidLanguagePackAvailability.ERROR,
-                        -> "Open settings"
-                        else -> null
-                    },
-                    onAction = when (status.availability) {
-                        AndroidLanguagePackAvailability.DOWNLOADABLE -> {
-                            { onDownloadStt(language) }
-                        }
-                        AndroidLanguagePackAvailability.SETUP_REQUIRED -> onOpenSttSettings
-                        AndroidLanguagePackAvailability.SCHEDULED -> onRefresh
-                        AndroidLanguagePackAvailability.ONLINE_ONLY,
-                        AndroidLanguagePackAvailability.UNSUPPORTED,
-                        AndroidLanguagePackAvailability.UNKNOWN,
-                        AndroidLanguagePackAvailability.ERROR,
-                        -> onOpenSttSettings
-                        else -> null
-                    },
-                )
-            }
             ttsMissing.forEach { language ->
                 val status = state.androidTtsLanguagePacks[language]
                     ?: AndroidLanguagePackStatus.CHECKING
@@ -1132,58 +732,28 @@ private fun AndroidLanguagePackActions(
     }
 }
 
-private enum class AndroidSpeechPackageKind(val label: String) {
-    STT("Speech-to-text (STT)"),
-    TTS("Text-to-speech (TTS)"),
-}
-
 @Composable
-private fun AndroidSpeechPackagesSettings(
+private fun AndroidTtsVoicesSettings(
     state: TranslatorUiState,
-    onDownloadStt: (AppLanguage) -> Unit,
     onRefresh: () -> Unit,
-    onOpenSttSettings: () -> Unit,
     onInstallTts: (AppLanguage) -> Unit,
 ) {
-    var selectedKind by remember { mutableStateOf(AndroidSpeechPackageKind.STT) }
-    SettingPicker(
-        value = selectedKind,
-        items = AndroidSpeechPackageKind.entries,
-        itemLabel = { it.label },
-        onSelected = { selectedKind = it },
-    )
     Text(
-        text = when (selectedKind) {
-            AndroidSpeechPackageKind.STT ->
-                "Available offline packages from installed Samsung or Google speech services. " +
-                    "A check mark means the package is ready on this phone."
-            AndroidSpeechPackageKind.TTS ->
-                "Offline voices from Samsung, Google, and Piper Serbian ONNX. " +
-                    "A check mark means the voice is ready on this phone."
-        },
+        text = "Offline voices from Samsung, Google, and Piper Serbian ONNX. " +
+            "A check mark means the voice is ready on this phone.",
         color = SayItMuted,
         fontSize = 13.sp,
     )
 
-    val statuses = when (selectedKind) {
-        AndroidSpeechPackageKind.STT -> state.androidSttLanguagePacks
-        AndroidSpeechPackageKind.TTS -> state.androidTtsLanguagePacks
-    }
     val listedPackages = AppLanguage.entries.mapNotNull { language ->
-        statuses[language]
+        state.androidTtsLanguagePacks[language]
             ?.takeIf(AndroidLanguagePackStatus::isListedPackage)
             ?.let { status -> language to status }
     }
 
     if (listedPackages.isEmpty()) {
         Text(
-            text = when (selectedKind) {
-                AndroidSpeechPackageKind.STT ->
-                    "No downloadable Samsung or Google STT packages were reported. " +
-                        "Package discovery and direct downloads require Android 13 or newer."
-                AndroidSpeechPackageKind.TTS ->
-                    "No supported Android TTS packages were reported by this phone."
-            },
+            text = "No supported Android TTS packages were reported by this phone.",
             color = SayItMuted,
             fontSize = 13.sp,
         )
@@ -1191,38 +761,22 @@ private fun AndroidSpeechPackagesSettings(
         listedPackages.forEach { (language, status) ->
             val actionLabel: String?
             val action: (() -> Unit)?
-            when (selectedKind) {
-                AndroidSpeechPackageKind.STT -> when (status.availability) {
-                    AndroidLanguagePackAvailability.DOWNLOADABLE -> {
-                        actionLabel = "Download"
-                        action = { onDownloadStt(language) }
-                    }
-                    AndroidLanguagePackAvailability.SCHEDULED -> {
-                        actionLabel = "Check again"
-                        action = onRefresh
-                    }
-                    else -> {
-                        actionLabel = null
-                        action = null
-                    }
+            when (status.availability) {
+                AndroidLanguagePackAvailability.DOWNLOADABLE -> {
+                    actionLabel = "Download"
+                    action = { onInstallTts(language) }
                 }
-                AndroidSpeechPackageKind.TTS -> when (status.availability) {
-                    AndroidLanguagePackAvailability.DOWNLOADABLE -> {
-                        actionLabel = "Download"
-                        action = { onInstallTts(language) }
-                    }
-                    AndroidLanguagePackAvailability.SETUP_REQUIRED -> {
-                        actionLabel = "Initialize"
-                        action = { onInstallTts(language) }
-                    }
-                    else -> {
-                        actionLabel = null
-                        action = null
-                    }
+                AndroidLanguagePackAvailability.SETUP_REQUIRED -> {
+                    actionLabel = "Initialize"
+                    action = { onInstallTts(language) }
+                }
+                else -> {
+                    actionLabel = null
+                    action = null
                 }
             }
             AndroidPackAction(
-                prefix = selectedKind.name,
+                prefix = "TTS",
                 language = language,
                 status = status,
                 actionLabel = actionLabel,
@@ -1231,27 +785,20 @@ private fun AndroidSpeechPackagesSettings(
         }
     }
 
-    if (selectedKind == AndroidSpeechPackageKind.STT && listedPackages.isEmpty()) {
-        TextButton(onClick = onOpenSttSettings) {
-            Text("Open Android voice input settings", fontWeight = FontWeight.Bold)
-        }
-    }
     OutlinedButton(
         onClick = onRefresh,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text("Refresh package list")
     }
-    if (selectedKind == AndroidSpeechPackageKind.TTS) {
-        Text(
-            text = "Android has no universal API for a silent per-language TTS download. " +
-                "Download opens the selected provider's installer. The Serbian Piper option " +
-                "downloads the official sherpa-onnx TTS Engine APK with the voice built in; " +
-                "install it, then return here to refresh.",
-            color = SayItMuted,
-            fontSize = 12.sp,
-        )
-    }
+    Text(
+        text = "Android has no universal API for a silent per-language TTS download. " +
+            "Download opens the selected provider's installer. The Serbian Piper option " +
+            "downloads the official sherpa-onnx TTS Engine APK with the voice built in; " +
+            "install it, then return here to refresh.",
+        color = SayItMuted,
+        fontSize = 12.sp,
+    )
 }
 
 @Composable
@@ -1300,61 +847,6 @@ private fun AndroidPackAction(
                 Text(actionLabel, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
-    }
-}
-
-@Composable
-private fun ProgressConnector(completed: Boolean) {
-    Box(
-        modifier = Modifier
-            .width(6.dp)
-            .height(2.dp)
-            .background(if (completed) SayItInk else SayItMuted.copy(alpha = 0.25f)),
-    )
-}
-
-@Composable
-private fun SpeechButton(
-    modifier: Modifier,
-    side: LanguageSide,
-    language: AppLanguage,
-    color: Color,
-    status: VoiceStatus,
-    activeSide: LanguageSide?,
-    onMicrophone: () -> Unit,
-) {
-    val listeningHere = status == VoiceStatus.LISTENING && activeSide == side
-    val busy = status !in listOf(VoiceStatus.READY, VoiceStatus.ERROR, VoiceStatus.LISTENING)
-    val disabled = busy || (status == VoiceStatus.LISTENING && !listeningHere)
-
-    Button(
-        onClick = onMicrophone,
-        enabled = !disabled,
-        modifier = modifier
-            .fillMaxWidth()
-            .height(112.dp),
-        shape = RoundedCornerShape(20.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = color,
-            disabledContainerColor = color.copy(alpha = 0.42f),
-            contentColor = Color.White,
-            disabledContentColor = Color.White.copy(alpha = 0.75f),
-        ),
-    ) {
-        Icon(
-            imageVector = if (listeningHere) Icons.Filled.Stop else Icons.Filled.Mic,
-            contentDescription = null,
-            modifier = Modifier.size(28.dp),
-        )
-        Spacer(Modifier.width(9.dp))
-        Text(
-            text = if (listeningHere) language.stopLabel else language.speakLabel,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -1440,97 +932,6 @@ private fun LanguagePicker(
     }
 }
 
-@Composable
-private fun PhraseCard(
-    label: String,
-    text: String,
-    color: Color,
-    background: Color,
-    isPartial: Boolean,
-    canReplay: Boolean,
-    canCopy: Boolean,
-    onReplay: () -> Unit,
-    onCopy: () -> Unit,
-    onOpen: () -> Unit,
-) {
-    Surface(
-        onClick = onOpen,
-        enabled = text.isNotBlank(),
-        modifier = Modifier
-            .fillMaxWidth()
-            .defaultMinSize(minHeight = 138.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = background.copy(alpha = 0.76f),
-        border = BorderStroke(1.dp, color.copy(alpha = 0.24f)),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 22.dp, vertical = 19.dp),
-            verticalArrangement = Arrangement.spacedBy(11.dp),
-        ) {
-            Text(
-                text = if (isPartial) "$label · partial" else label,
-                color = color,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.ExtraBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (text.isNotBlank()) {
-                Text(
-                    text = text,
-                    color = if (isPartial) SayItInk.copy(alpha = 0.58f) else SayItInk,
-                    fontFamily = FontFamily.Serif,
-                    fontSize = 29.sp,
-                    lineHeight = 35.sp,
-                )
-            }
-            if (canCopy || canReplay) {
-                Row(
-                    modifier = Modifier.align(Alignment.End),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (canCopy) {
-                        OutlinedButton(
-                            onClick = onCopy,
-                            enabled = text.isNotBlank(),
-                            modifier = Modifier.height(52.dp),
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, color.copy(alpha = 0.55f)),
-                        ) {
-                            Icon(
-                                Icons.Filled.ContentCopy,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(7.dp))
-                            Text("Copy", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    if (canReplay) {
-                        Button(
-                            onClick = onReplay,
-                            modifier = Modifier.height(52.dp),
-                            shape = CircleShape,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = color,
-                                contentColor = Color.White,
-                            ),
-                        ) {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                modifier = Modifier.size(22.dp),
-                            )
-                            Spacer(Modifier.width(7.dp))
-                            Text("Replay", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 private data class ExpandedPhrase(
     val label: String,
     val text: String,
@@ -1606,7 +1007,7 @@ private fun PhraseDetailScreen(
                 border = BorderStroke(1.dp, phrase.color.copy(alpha = 0.6f)),
             ) {
                 Icon(
-                    Icons.Filled.ContentCopy,
+                    AppIcons.ContentCopy,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                 )
@@ -1621,17 +1022,7 @@ private fun PhraseDetailScreen(
 private fun SettingsScreen(
     state: TranslatorUiState,
     onTranslationOption: (TranslationOption) -> Unit,
-    onSerbianScript: (SerbianScript) -> Unit,
-    onDownloadOfflineModel: () -> Unit,
-    onDeleteOfflineModel: () -> Unit,
-    onDownloadWhisperModel: () -> Unit,
-    onDeleteWhisperModel: () -> Unit,
-    onSttEngine: (SttEngine) -> Unit,
-    onLayoutMode: (LayoutMode) -> Unit,
-    onSilenceAutoStopSeconds: (Float) -> Unit,
-    onDownloadSttPack: (AppLanguage) -> Unit,
     onRefreshSpeechPacks: () -> Unit,
-    onOpenSttSettings: () -> Unit,
     onInstallTtsPack: (AppLanguage) -> Unit,
     onExportLogs: () -> Unit,
     onOpenCloudUsage: (String) -> Unit,
@@ -1672,101 +1063,14 @@ private fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             SettingsSection(
-                title = "Recognition",
-            ) {
-                SettingPicker(
-                    value = state.sttEngine,
-                    items = SttEngine.entries,
-                    itemLabel = { it.label },
-                    itemEnabled = { engine ->
-                        !engine.isWhisperOffline() || state.whisperRuntimeAvailable
-                    },
-                    onSelected = onSttEngine,
-                )
-                if (!state.whisperRuntimeAvailable) {
-                    Text(
-                        text = "Whisper Offline requires a 64-bit ARM Android phone.",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                    )
-                }
-                if (state.sttEngine.isWhisperOffline()) {
-                    OfflineModelPanel(
-                        title = "Whisper Large V3 Turbo Q4_0",
-                        subtitle = "On-device recognition after Stop",
-                        status = state.whisperModelStatus,
-                        downloadSizeLabel = state.whisperModelDownloadSizeLabel,
-                        onDownload = onDownloadWhisperModel,
-                        onDelete = onDeleteWhisperModel,
-                    )
-                }
-            }
-
-            SettingsSection(
                 title = "Translation",
             ) {
                 SettingPicker(
                     value = TranslationOption.from(state),
                     items = TranslationOption.entries,
                     itemLabel = { it.label },
-                    itemEnabled = { option ->
-                        !option.engine.isOfflineOpus() ||
-                            (isOfflineOpusDirection(
-                                option.engine,
-                                state.languageA,
-                                state.languageB,
-                            ) && state.offlineRuntimeAvailable)
-                    },
                     onSelected = onTranslationOption,
                 )
-                if (!isOfflineSlavicDirection(state.languageA, state.languageB)) {
-                    Text(
-                        text = "Offline OPUS supports Russian ↔ Serbian/Croatian.",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                    )
-                }
-                if (!state.offlineRuntimeAvailable) {
-                    Text(
-                        text = "Offline OPUS requires arm64 and Android 9 or newer.",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                    )
-                }
-                if (
-                    state.translationEngine == TranslationEngine.OFFLINE_OPUS_SLAVIC &&
-                    (state.languageA == AppLanguage.SERBIAN ||
-                        state.languageB == AppLanguage.SERBIAN)
-                ) {
-                    Text(
-                        text = "Serbian output",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    SettingPicker(
-                        value = state.serbianScript,
-                        items = SerbianScript.entries,
-                        itemLabel = { it.label },
-                        onSelected = onSerbianScript,
-                    )
-                }
-                if (state.offlineRuntimeAvailable) {
-                    Text(
-                        text = "Offline model downloads",
-                        color = SayItMuted,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    OfflineModelPanel(
-                        title = "OPUS Slavic FP32",
-                        subtitle = "Russian ↔ Serbian / Croatian",
-                        status = state.offlineModelStatus,
-                        downloadSizeLabel = state.offlineModelDownloadSizeLabel,
-                        onDownload = onDownloadOfflineModel,
-                        onDelete = onDeleteOfflineModel,
-                    )
-                }
             }
 
             SettingsSection(
@@ -1781,13 +1085,11 @@ private fun SettingsScreen(
             }
 
             SettingsSection(
-                title = "Android speech packages",
+                title = "Android TTS voices",
             ) {
-                AndroidSpeechPackagesSettings(
+                AndroidTtsVoicesSettings(
                     state = state,
-                    onDownloadStt = onDownloadSttPack,
                     onRefresh = onRefreshSpeechPacks,
-                    onOpenSttSettings = onOpenSttSettings,
                     onInstallTts = onInstallTtsPack,
                 )
             }
@@ -1796,48 +1098,11 @@ private fun SettingsScreen(
                 title = "Automatic stop",
             ) {
                 Text(
-                    text = "After speech starts, Groq Whisper or Gemini Transcribe Live stops " +
-                        "and begins translation when this pause is reached. " +
-                        "The Stop button remains available.",
+                    text = "Gemini Transcribe Live uses server voice activity detection with " +
+                        "a 0.7-second pause and " +
+                        "a local 1-second fallback. Manual translation remains available in Live.",
                     color = SayItMuted,
                     fontSize = 13.sp,
-                )
-                var secondsText by remember(state.silenceAutoStopSeconds) {
-                    mutableStateOf(formatSilenceAutoStopSeconds(state.silenceAutoStopSeconds))
-                }
-                val seconds = parseSilenceAutoStopSeconds(secondsText)
-                val valid = seconds != null
-                OutlinedTextField(
-                    value = secondsText,
-                    onValueChange = { updated ->
-                        if (updated.matches(Regex("""^$|^\d(?:[.,]\d?)?$"""))) {
-                            secondsText = updated
-                            parseSilenceAutoStopSeconds(updated)
-                                ?.let(onSilenceAutoStopSeconds)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Pause duration") },
-                    suffix = { Text("seconds") },
-                    supportingText = {
-                        Text(
-                            "Allowed range: 0.1–5.0 seconds; one decimal place maximum",
-                        )
-                    },
-                    isError = !valid,
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                )
-            }
-
-            SettingsSection(
-                title = "Layout",
-            ) {
-                SettingPicker(
-                    value = state.layoutMode,
-                    items = LayoutMode.entries,
-                    itemLabel = { it.label },
-                    onSelected = onLayoutMode,
                 )
             }
 
@@ -1886,18 +1151,6 @@ private fun SettingsScreen(
                     label = "Gemini usage and rate limits",
                     urlLabel = "aistudio.google.com",
                     url = GEMINI_RATE_LIMITS_URL,
-                    onOpen = onOpenCloudUsage,
-                )
-                CloudUsageLink(
-                    label = "Groq Whisper usage",
-                    urlLabel = "console.groq.com/dashboard/usage",
-                    url = GROQ_USAGE_URL,
-                    onOpen = onOpenCloudUsage,
-                )
-                CloudUsageLink(
-                    label = "Groq Whisper rate limits",
-                    urlLabel = "console.groq.com/settings/limits",
-                    url = GROQ_LIMITS_URL,
                     onOpen = onOpenCloudUsage,
                 )
             }
@@ -2004,78 +1257,6 @@ private fun <T> SettingPicker(
     }
 }
 
-@Composable
-private fun OfflineModelPanel(
-    title: String,
-    subtitle: String,
-    status: OfflineModelStatus,
-    downloadSizeLabel: String,
-    onDownload: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = SayItPaper.copy(alpha = 0.72f),
-        shape = RoundedCornerShape(15.dp),
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                title,
-                color = SayItInk,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(subtitle, color = SayItMuted, fontSize = 13.sp)
-            when (status) {
-                OfflineModelStatus.NotInstalled -> Button(
-                    onClick = onDownload,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Download model ($downloadSizeLabel)")
-                }
-
-                is OfflineModelStatus.Downloading -> {
-                    val percent = (status.progress * 100).toInt()
-                    LinearProgressIndicator(
-                        progress = { status.progress },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text("Downloading · $percent%", color = SayItMuted, fontSize = 13.sp)
-                }
-
-                is OfflineModelStatus.Installed -> {
-                    Text(
-                        "Installed · Works offline · ${status.installedSizeLabel}",
-                        color = SayItInk.copy(alpha = 0.7f),
-                        fontSize = 13.sp,
-                    )
-                    TextButton(onClick = onDelete) { Text("Delete model") }
-                }
-
-                is OfflineModelStatus.Invalid -> {
-                    Text(status.reason, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-                    Button(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
-                        Text("Download again ($downloadSizeLabel)")
-                    }
-                    TextButton(onClick = onDelete) { Text("Delete model") }
-                }
-
-                is OfflineModelStatus.Error -> {
-                    Text(status.reason, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-                    Button(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
-                        Text("Retry download ($downloadSizeLabel)")
-                    }
-                }
-            }
-        }
-    }
-}
-
-private fun formatClock(seconds: Int): String =
-    "%02d:%02d".format(seconds / 60, seconds % 60)
-
 private fun copyText(context: Context, text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("Say it translation", text))
@@ -2083,5 +1264,3 @@ private fun copyText(context: Context, text: String) {
 
 private const val GEMINI_RATE_LIMITS_URL =
     "https://aistudio.google.com/rate-limit?timeRange=last-28-days"
-private const val GROQ_USAGE_URL = "https://console.groq.com/dashboard/usage"
-private const val GROQ_LIMITS_URL = "https://console.groq.com/settings/limits"

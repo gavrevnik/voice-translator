@@ -16,4 +16,5 @@ android/**/build/
 android/**/.cxx/
 android/model-packs/
 android/optional/whisper/models/*.bin
+android/optional/offline/assets/*.bin
 android/.idea/

@@ -27,7 +27,7 @@ class WhisperSttProvider(
     private var sessionConfig = WhisperTranscriptionConfig(
         model = WHISPER_OFFLINE_MODEL,
         threads = WHISPER_INFERENCE_THREADS,
-        language = AppLanguage.ENGLISH.whisperCode,
+        language = AppLanguage.ENGLISH.code,
     )
     @Volatile
     private var whisperContext: WhisperContext? = null
@@ -56,7 +56,7 @@ class WhisperSttProvider(
         val config = WhisperTranscriptionConfig(
             model = WHISPER_OFFLINE_MODEL,
             threads = WHISPER_INFERENCE_THREADS,
-            language = language.whisperCode,
+            language = language.code,
         )
         check(modelManager.manifest.id == "whisper-$WHISPER_OFFLINE_MODEL") {
             "Installed Whisper model does not match ${config.model}."

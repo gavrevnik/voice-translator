@@ -31,7 +31,6 @@ class GeminiTranslationProvider(
         targetLanguage: AppLanguage,
         transcript: String,
         geminiModel: GeminiTranslationModel,
-        serbianScript: SerbianScript,
         liveSourceLanguage: String?,
     ): TranslationResult {
         val promptMode = if (liveSourceLanguage == null) {
