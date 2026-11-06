@@ -1,0 +1,72 @@
+name: Mirror repository to GitLab
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitlab-repository-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository_owner == 'gavrevnik'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Copy published branches and tags
+        shell: bash
+        env:
+          GITHUB_READ_TOKEN: ${{ github.token }}
+          SOURCE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITLAB_MIRROR_PROJECT: ${{ vars.GITLAB_MIRROR_PROJECT }}
+          GITLAB_MIRROR_SSH_KEY: ${{ secrets.GITLAB_MIRROR_SSH_KEY }}
+        run: |
+          source_name=$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')
+          if [[ "$GITLAB_MIRROR_PROJECT" != "gavrevnik-backups/$source_name" || -z "$GITLAB_MIRROR_SSH_KEY" ]]; then
+            echo 'Configure the matching GITLAB_MIRROR_PROJECT and its SSH key.' >&2
+            exit 1
+          fi
+
+          umask 077
+          mirror_dir=$(mktemp -d)
+          trap 'rm -rf "$mirror_dir"' EXIT
+          cd "$mirror_dir"
+          git init --bare --quiet
+
+          # Reconcile from the current refs, including when retrying an older run.
+          github_repo="https://github.com/${GITHUB_REPOSITORY}.git"
+          github_auth="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_READ_TOKEN" | base64 | tr -d '\n')"
+          export github_auth
+          git --config-env="http.${github_repo}.extraHeader=github_auth" fetch --no-tags "$github_repo" \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+          unset github_auth GITHUB_READ_TOKEN
+
+          printf '%s\n' "$GITLAB_MIRROR_SSH_KEY" > deploy-key
+          unset GITLAB_MIRROR_SSH_KEY
+          # GitLab.com's published ED25519 host key.
+          printf '%s\n' 'gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf' > known_hosts
+          export GIT_SSH_COMMAND='ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=./known_hosts -i ./deploy-key'
+          gitlab_repo="git@gitlab.com:${GITLAB_MIRROR_PROJECT}.git"
+
+          target_refs=$(git ls-remote --refs --branches --tags "$gitlab_repo")
+          if [[ -z "$target_refs" ]]; then
+            # Seed the GitLab default branch before sending other refs.
+            default_ref="refs/heads/$SOURCE_DEFAULT_BRANCH"
+            git push -o ci.skip "$gitlab_repo" "$default_ref:$default_ref"
+          fi
+
+          # Retain deleted refs on the backup. A rewritten ref requires review.
+          git push --atomic -o ci.skip "$gitlab_repo" 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
+
+          export LC_ALL=C
+          git for-each-ref --format='%(objectname)%09%(refname)' refs/heads refs/tags | sort > github-refs
+          git ls-remote --refs --branches --tags "$gitlab_repo" | sort > gitlab-refs
+          if [[ -n $(comm -23 github-refs gitlab-refs) ]]; then
+            echo 'GitLab is missing a branch or tag from GitHub, or its object ID differs.' >&2
+            exit 1
+          fi
+          echo "Verified $(wc -l < github-refs) GitHub branch and tag refs on GitLab."
